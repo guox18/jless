@@ -29,6 +29,7 @@ mod lineprinter;
 mod options;
 mod screenwriter;
 mod search;
+mod sless;
 mod terminal;
 mod truncatedstrview;
 mod types;
@@ -40,6 +41,7 @@ use options::{DataFormat, Opt};
 
 fn main() {
     let opt = Opt::parse();
+    sless::main();
 
     let (input_string, input_filename) = match get_input_and_filename(&opt) {
         Ok(input_and_filename) => input_and_filename,

@@ -5,6 +5,7 @@ use std::io::Write;
 
 use clipboard::{ClipboardContext, ClipboardProvider};
 use rustyline::error::ReadlineError;
+use rustyline::history::MemHistory;
 use rustyline::Editor;
 use termion::event::Key;
 use termion::event::MouseButton::{Left, WheelDown, WheelUp};
@@ -126,8 +127,18 @@ impl App {
         let mut viewer = JsonViewer::new(flatjson, opt.mode);
         viewer.scrolloff_setting = opt.scrolloff;
 
-        let screen_writer =
-            ScreenWriter::init(opt, stdout, Editor::<()>::new(), TTYDimensions::default());
+        // PreferTerm to always read from /dev/tty instead of stdin.
+        let editor_config = rustyline::config::Config::builder()
+            .behavior(rustyline::config::Behavior::PreferTerm)
+            .build();
+
+        let editor =
+            match Editor::<(), MemHistory>::with_history(editor_config, MemHistory::default()) {
+                Ok(editor) => editor,
+                Err(err) => return Err(format!("Unable to build readline editor: {err:?}")),
+            };
+
+        let screen_writer = ScreenWriter::init(opt, stdout, editor, TTYDimensions::default());
 
         Ok(App {
             viewer,

@@ -3,6 +3,7 @@ use std::fmt::Write;
 use std::iter::Peekable;
 use std::ops::Range;
 
+use rustyline::history::MemHistory;
 use rustyline::Editor;
 use termion::raw::RawTerminal;
 use unicode_segmentation::UnicodeSegmentation;
@@ -22,7 +23,7 @@ use crate::viewer::{JsonViewer, Mode};
 
 pub struct ScreenWriter {
     pub stdout: RawTerminal<Box<dyn std::io::Write>>,
-    pub command_editor: Editor<()>,
+    pub command_editor: Editor<(), MemHistory>,
     pub dimensions: TTYDimensions,
     pub terminal: AnsiTerminal,
 
@@ -57,7 +58,7 @@ impl ScreenWriter {
     pub fn init(
         options: &Opt,
         stdout: RawTerminal<Box<dyn std::io::Write>>,
-        command_editor: Editor<()>,
+        command_editor: Editor<(), MemHistory>,
         dimensions: TTYDimensions,
     ) -> Self {
         ScreenWriter {
