@@ -63,7 +63,7 @@ pub fn main() {
 
         loop {
             match events_receiver.recv() {
-                Ok(InputEvent::Sigwinch) => print!("Got SIGWINC\r\n"),
+                Ok(InputEvent::Sigwinch) => print!("Got SIGWINCH\r\n"),
                 Ok(InputEvent::DataInput(databuf)) => {
                     print!("Got data: {:?}\r\n", databuf.data().as_bstr());
                     let _ = databuf_sender.send(databuf);

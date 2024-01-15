@@ -29,6 +29,7 @@ mod lineprinter;
 mod options;
 mod screenwriter;
 mod search;
+mod sexp_tokenizer;
 mod sless;
 mod terminal;
 mod truncatedstrview;
