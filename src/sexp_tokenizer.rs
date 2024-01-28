@@ -62,42 +62,29 @@ enum State {
     BlockCommentPound,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum Part {
-    All,
-    Start,
-    Middle,
-    End,
-}
-
-impl Part {
-    fn create_at_end(reported_start: bool) -> Part {
-        match reported_start {
-            true => Part::End,
-            false => Part::All,
-        }
-    }
-
-    fn create_after_middle(reported_start: bool) -> Part {
-        match reported_start {
-            true => Part::Middle,
-            false => Part::Start,
-        }
-    }
-}
-
 #[derive(Copy, Clone, Debug)]
-pub enum PartialToken<'a> {
+pub enum Token<'a> {
     OpenParen,
     CloseParen,
-    Atom(Part, &'a [u8]),
-    LineComment(Part, &'a [u8]),
+    Atom(&'a [u8]),
+    LineComment(&'a [u8]),
     SexpComment,
-    BlockComment(Part, &'a [u8]),
+    BlockComment(&'a [u8]),
+}
+
+impl<'a> Token<'a> {
+    fn requires_finishing(self) -> bool {
+        matches!(
+            self,
+            Token::Atom(_) | Token::LineComment(_) | Token::BlockComment(_)
+        )
+    }
 }
 
 pub trait Parser<'a> {
-    fn process_token(&mut self, partial_token: PartialToken<'a>) -> ();
+    fn process_token(&mut self, token: Token<'a>) -> ();
+    fn continue_token(&mut self, bytes: &'a [u8]) -> ();
+    fn finish_token(&mut self) -> ();
 }
 
 pub struct Tokenizer {
@@ -105,6 +92,12 @@ pub struct Tokenizer {
     block_comment_depth: usize,
     line_num: usize,
     column_byte_num: usize,
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub enum TokenizationError {
+    UnterminatedQuotedAtom,
+    UnterminatedBlockQuote,
 }
 
 impl Tokenizer {
@@ -147,8 +140,8 @@ impl Tokenizer {
             match self.state {
                 State::Start => match byte {
                     b' ' | b'\n' | b'\t' | b'\r' | b'\x0C' => { /* Do nothing */ }
-                    b'(' => parser.process_token(PartialToken::OpenParen),
-                    b')' => parser.process_token(PartialToken::CloseParen),
+                    b'(' => parser.process_token(Token::OpenParen),
+                    b')' => parser.process_token(Token::CloseParen),
                     b'#' => {
                         curr_token_start = i;
                         self.state = State::Pound;
@@ -172,9 +165,13 @@ impl Tokenizer {
                 },
                 State::InUnquotedAtom => match byte {
                     b' ' | b'\n' | b'\t' | b'\r' | b'\x0C' => {
-                        let part = Part::create_at_end(reported_start_of_current_token);
                         let range = &bytes[curr_token_start..i];
-                        parser.process_token(PartialToken::Atom(part, range));
+                        if reported_start_of_current_token {
+                            parser.continue_token(range);
+                        } else {
+                            parser.process_token(Token::Atom(range));
+                        }
+                        parser.finish_token();
 
                         self.state = State::Start;
                         // [curr_token_start] is now invalid, but will be set
@@ -182,26 +179,38 @@ impl Tokenizer {
                     }
                     b'(' => {
                         // End current atom, and emit open paren
-                        let part = Part::create_at_end(reported_start_of_current_token);
                         let range = &bytes[curr_token_start..i];
-                        parser.process_token(PartialToken::Atom(part, range));
-                        parser.process_token(PartialToken::OpenParen);
+                        if reported_start_of_current_token {
+                            parser.continue_token(range);
+                        } else {
+                            parser.process_token(Token::Atom(range));
+                        }
+                        parser.finish_token();
+                        parser.process_token(Token::OpenParen);
 
                         self.state = State::Start;
                     }
                     b')' => {
-                        let part = Part::create_at_end(reported_start_of_current_token);
                         let range = &bytes[curr_token_start..i];
-                        parser.process_token(PartialToken::Atom(part, range));
-                        parser.process_token(PartialToken::CloseParen);
+                        if reported_start_of_current_token {
+                            parser.continue_token(range);
+                        } else {
+                            parser.process_token(Token::Atom(range));
+                        }
+                        parser.finish_token();
+                        parser.process_token(Token::CloseParen);
 
                         self.state = State::Start;
                     }
                     b'"' => {
                         // End current atom, and start a new quoted one
-                        let part = Part::create_at_end(reported_start_of_current_token);
                         let range = &bytes[curr_token_start..i];
-                        parser.process_token(PartialToken::Atom(part, range));
+                        if reported_start_of_current_token {
+                            parser.continue_token(range);
+                        } else {
+                            parser.process_token(Token::Atom(range));
+                        }
+                        parser.finish_token();
 
                         curr_token_start = i;
                         self.state = State::InQuotedAtom;
@@ -212,10 +221,15 @@ impl Tokenizer {
                 State::InQuotedAtom => match byte {
                     b'"' => {
                         // End current atom
-                        let part = Part::create_at_end(reported_start_of_current_token);
+
                         // Include trailing '"'
                         let range = &bytes[curr_token_start..=i];
-                        parser.process_token(PartialToken::Atom(part, range));
+                        if reported_start_of_current_token {
+                            parser.continue_token(range);
+                        } else {
+                            parser.process_token(Token::Atom(range));
+                        }
+                        parser.finish_token();
 
                         curr_token_start = i;
                         self.state = State::Start;
@@ -234,48 +248,74 @@ impl Tokenizer {
                 State::LineComment => match byte {
                     b'\n' => {
                         // End line comment
-                        let part = Part::create_at_end(reported_start_of_current_token);
                         let range = &bytes[curr_token_start..i];
-                        parser.process_token(PartialToken::LineComment(part, range));
+                        if reported_start_of_current_token {
+                            parser.continue_token(range);
+                        } else {
+                            parser.process_token(Token::LineComment(range));
+                        }
+                        parser.finish_token();
+
+                        curr_token_start = i;
+                        self.state = State::Start;
+                        reported_start_of_current_token = false;
                     }
                     _ => { /* Do nothing, continue processing comment. */ }
                 },
                 State::Pound => match byte {
                     b';' => {
                         // Emit sexp comment ("#;"), then go back to start state.
-                        parser.process_token(PartialToken::SexpComment);
+                        parser.process_token(Token::SexpComment);
                         self.state = State::Start;
                     }
                     b'|' => {
                         // Report the start '#' (which may have been in a previous batch).
-                        parser.process_token(PartialToken::BlockComment(Part::Start, b"#"));
-                        self.block_comment_depth = 1;
+                        if curr_token_start == 0 {
+                            parser.process_token(Token::BlockComment(b"#"));
 
-                        curr_token_start = i;
+                            curr_token_start = i;
+                            reported_start_of_current_token = true;
+                        } else {
+                            curr_token_start = i - 1;
+                            reported_start_of_current_token = false;
+                        }
+
+                        self.block_comment_depth = 1;
                         self.state = State::BlockComment;
-                        reported_start_of_current_token = true;
                     }
                     b' ' | b'\n' | b'\t' | b'\r' | b'\x0C' => {
                         // Emit "#" atom, then go back to start state.
-                        parser.process_token(PartialToken::Atom(Part::All, b"#"));
+                        parser.process_token(Token::Atom(b"#"));
+                        parser.finish_token();
                         self.state = State::Start;
                     }
                     b'(' => {
                         // End "#" atom, and emit open paren
-                        parser.process_token(PartialToken::Atom(Part::All, b"#"));
-                        parser.process_token(PartialToken::OpenParen);
+                        parser.process_token(Token::Atom(b"#"));
+                        parser.finish_token();
+                        parser.process_token(Token::OpenParen);
                         self.state = State::Start;
                     }
                     b')' => {
                         // End "#" atom, and emit open paren
-                        parser.process_token(PartialToken::Atom(Part::All, b"#"));
-                        parser.process_token(PartialToken::CloseParen);
+                        parser.process_token(Token::Atom(b"#"));
+                        parser.finish_token();
+                        parser.process_token(Token::CloseParen);
                         self.state = State::Start;
+                    }
+                    b'"' => {
+                        // End "#" atom, move into quoted atom.
+                        parser.process_token(Token::Atom(b"#"));
+                        parser.finish_token();
+
+                        curr_token_start = i;
+                        self.state = State::InQuotedAtom;
+                        reported_start_of_current_token = false;
                     }
                     _ => {
                         // Emit the start of an atom that starts with '#', then start
                         // processing that atom.
-                        parser.process_token(PartialToken::Atom(Part::Start, b"#"));
+                        parser.process_token(Token::Atom(b"#"));
                         curr_token_start = i;
                         self.state = State::InUnquotedAtom;
                         reported_start_of_current_token = true;
@@ -313,10 +353,15 @@ impl Tokenizer {
                     b'#' => {
                         self.block_comment_depth -= 1;
                         if self.block_comment_depth == 0 {
-                            let part = Part::create_at_end(reported_start_of_current_token);
                             // Include trailing '#' char
                             let range = &bytes[curr_token_start..=i];
-                            parser.process_token(PartialToken::BlockComment(part, range));
+
+                            if reported_start_of_current_token {
+                                parser.continue_token(range);
+                            } else {
+                                parser.process_token(Token::BlockComment(range));
+                            }
+                            parser.finish_token();
 
                             self.state = State::Start;
                         } else {
@@ -346,24 +391,61 @@ impl Tokenizer {
         }
 
         // Emit the start/middle of whatever token we're currently processing.
-        let part = Part::create_after_middle(reported_start_of_current_token);
         let range = &bytes[curr_token_start..];
 
         match self.state {
-            Start | Pound => {}
-            InUnquotedAtom | InQuotedAtom | InQuotedAtomEscape => {
-                parser.process_token(PartialToken::Atom(part, range));
+            State::Start | State::Pound => {}
+            State::InUnquotedAtom | State::InQuotedAtom | State::InQuotedAtomEscape => {
+                if reported_start_of_current_token {
+                    parser.continue_token(range);
+                } else {
+                    parser.process_token(Token::Atom(range));
+                }
             }
-            LineComment => {
-                parser.process_token(PartialToken::LineComment(part, range));
+            State::LineComment => {
+                if reported_start_of_current_token {
+                    parser.continue_token(range);
+                } else {
+                    parser.process_token(Token::LineComment(range));
+                }
             }
-            BlockComment
-            | BlockCommentQuotedString
-            | BlockCommentQuotedStringEscape
-            | BlockCommentBar
-            | BlockCommentPound => {
-                parser.process_token(PartialToken::BlockComment(part, range));
+            State::BlockComment
+            | State::BlockCommentQuotedString
+            | State::BlockCommentQuotedStringEscape
+            | State::BlockCommentBar
+            | State::BlockCommentPound => {
+                if reported_start_of_current_token {
+                    parser.continue_token(range);
+                } else {
+                    parser.process_token(Token::BlockComment(range));
+                }
             }
+        }
+    }
+
+    pub fn eof<'p, 't, P: Parser<'t>>(
+        &mut self,
+        parser: &'p mut P,
+    ) -> Result<(), TokenizationError> {
+        match self.state {
+            State::Start => Ok(()),
+            State::Pound => {
+                parser.process_token(Token::BlockComment(b"#"));
+                parser.finish_token();
+                Ok(())
+            }
+            State::InUnquotedAtom | State::LineComment => {
+                parser.finish_token();
+                Ok(())
+            }
+            State::InQuotedAtom | State::InQuotedAtomEscape => {
+                Err(TokenizationError::UnterminatedQuotedAtom)
+            }
+            State::BlockComment
+            | State::BlockCommentQuotedString
+            | State::BlockCommentQuotedStringEscape
+            | State::BlockCommentBar
+            | State::BlockCommentPound => Err(TokenizationError::UnterminatedBlockQuote),
         }
     }
 }
@@ -375,57 +457,253 @@ mod tests {
     use super::*;
 
     #[derive(PartialEq, Eq, Debug)]
-    enum OwnedPartialToken {
+    enum OwnedToken {
         OpenParen,
         CloseParen,
-        Atom(Part, BString),
-        LineComment(Part, BString),
+        Atom(BString),
+        LineComment(BString),
         SexpComment,
-        BlockComment(Part, BString),
+        BlockComment(BString),
     }
 
-    impl<'a> From<PartialToken<'a>> for OwnedPartialToken {
-        fn from(partial_token: PartialToken<'a>) -> Self {
-            match partial_token {
-                PartialToken::OpenParen => OwnedPartialToken::OpenParen,
-                PartialToken::CloseParen => OwnedPartialToken::CloseParen,
-                PartialToken::Atom(part, s) => OwnedPartialToken::Atom(part, s.into()),
-                PartialToken::LineComment(part, s) => {
-                    OwnedPartialToken::LineComment(part, s.into())
-                }
-                PartialToken::SexpComment => OwnedPartialToken::SexpComment,
-                PartialToken::BlockComment(part, s) => {
-                    OwnedPartialToken::BlockComment(part, s.into())
-                }
+    fn op() -> OwnedToken {
+        OwnedToken::OpenParen
+    }
+
+    fn cp() -> OwnedToken {
+        OwnedToken::CloseParen
+    }
+
+    fn sc() -> OwnedToken {
+        OwnedToken::SexpComment
+    }
+
+    fn atom(bytes: &[u8]) -> OwnedToken {
+        OwnedToken::Atom(bytes.into())
+    }
+
+    fn line_comment(bytes: &[u8]) -> OwnedToken {
+        OwnedToken::LineComment(bytes.into())
+    }
+
+    fn block_comment(bytes: &[u8]) -> OwnedToken {
+        OwnedToken::BlockComment(bytes.into())
+    }
+
+    impl<'a> From<Token<'a>> for OwnedToken {
+        fn from(token: Token<'a>) -> Self {
+            match token {
+                Token::OpenParen => OwnedToken::OpenParen,
+                Token::CloseParen => OwnedToken::CloseParen,
+                Token::Atom(s) => OwnedToken::Atom(s.into()),
+                Token::LineComment(s) => OwnedToken::LineComment(s.into()),
+                Token::SexpComment => OwnedToken::SexpComment,
+                Token::BlockComment(s) => OwnedToken::BlockComment(s.into()),
             }
         }
     }
 
     #[derive(Debug)]
     struct TokenCollector {
-        partial_tokens: Vec<OwnedPartialToken>,
+        tokens: Vec<OwnedToken>,
+        waiting_to_finish_token: bool,
     }
 
     impl TokenCollector {
         fn new() -> TokenCollector {
             TokenCollector {
-                partial_tokens: vec![],
+                tokens: vec![],
+                waiting_to_finish_token: false,
             }
         }
     }
 
     impl<'a> Parser<'a> for TokenCollector {
-        fn process_token(&mut self, partial_token: PartialToken<'a>) {
-            self.partial_tokens.push(partial_token.into())
+        fn process_token(&mut self, token: Token<'a>) {
+            assert!(
+                !self.waiting_to_finish_token,
+                "process_token called, but expected token to be finished, {:?}, {:?}",
+                token, &self
+            );
+            self.tokens.push(token.into());
+            self.waiting_to_finish_token = token.requires_finishing();
         }
+
+        fn continue_token(&mut self, bytes: &'a [u8]) {
+            assert!(
+                self.waiting_to_finish_token,
+                "continue_token, but not waiting for token to be finished, {self:?}"
+            );
+            match self.tokens.last_mut() {
+                None => panic!("continue_token called before receiving any tokens"),
+                Some(OwnedToken::OpenParen | OwnedToken::CloseParen | OwnedToken::SexpComment) => {
+                    panic!("most recent token does not require finishing")
+                }
+                Some(
+                    OwnedToken::Atom(s) | OwnedToken::LineComment(s) | OwnedToken::BlockComment(s),
+                ) => {
+                    s.extend_from_slice(bytes);
+                }
+            }
+        }
+
+        fn finish_token(&mut self) {
+            assert!(
+                self.waiting_to_finish_token,
+                "finish_token, but not waiting for token to be finished, {self:?}"
+            );
+            self.waiting_to_finish_token = false;
+        }
+    }
+
+    #[track_caller]
+    fn assert_tokenizes(
+        byte_slices: Vec<&[u8]>,
+        expected: &[OwnedToken],
+    ) -> Result<(), TokenizationError> {
+        let mut tokenizer = Tokenizer::new();
+        let mut token_collector = TokenCollector::new();
+
+        for bytes in byte_slices.iter() {
+            tokenizer.tokenize(bytes, &mut token_collector);
+        }
+
+        let result = tokenizer.eof(&mut token_collector);
+
+        assert_eq!(result.is_ok(), !token_collector.waiting_to_finish_token);
+        assert_eq!(token_collector.tokens, expected);
+
+        result
+    }
+
+    #[track_caller]
+    fn assert_valid_tokens(bytes: &[u8], expected: Vec<OwnedToken>) {
+        let result = assert_tokenizes(vec![bytes], &expected);
+        assert_eq!(Ok(()), result);
+
+        let mut one_byte_at_a_time = vec![];
+        for i in 0..(bytes.len()) {
+            one_byte_at_a_time.push(&bytes[i..(i + 1)]);
+        }
+
+        let result = assert_tokenizes(one_byte_at_a_time, &expected);
+        assert_eq!(Ok(()), result);
+
+        let mut byte_pairs = vec![];
+        let mut offset_byte_pairs = vec![&bytes[0..1]];
+        let mut i = 0;
+        let len = bytes.len();
+        while i < len {
+            byte_pairs.push(&bytes[i..(len.min(i + 2))]);
+            if i + 1 < bytes.len() {
+                offset_byte_pairs.push(&bytes[(i + 1)..(len.min(i + 3))]);
+            }
+            i += 2;
+        }
+
+        let result = assert_tokenizes(byte_pairs, &expected);
+        assert_eq!(Ok(()), result);
+
+        let result = assert_tokenizes(offset_byte_pairs, &expected);
+        assert_eq!(Ok(()), result);
+    }
+
+    #[track_caller]
+    fn assert_unterminated_quoted_atom(bytes: &[u8], expected: Vec<OwnedToken>) {
+        let result = assert_tokenizes(vec![bytes], &expected);
+        assert_eq!(Err(TokenizationError::UnterminatedQuotedAtom), result);
+    }
+
+    #[track_caller]
+    fn assert_unterminated_block_quote(bytes: &[u8], expected: Vec<OwnedToken>) {
+        let result = assert_tokenizes(vec![bytes], &expected);
+        assert_eq!(Err(TokenizationError::UnterminatedBlockQuote), result);
     }
 
     #[test]
     fn test_basic() {
-        let mut tokenizer = Tokenizer::new();
-        let mut token_collector = TokenCollector::new();
-        tokenizer.tokenize(br#"(abc "def ghi" jkl)"#, &mut token_collector);
-        dbg!(token_collector);
-        assert_eq!(1, 2);
+        assert_valid_tokens(
+            br#"(abc "def ghi" jkl)"#,
+            vec![op(), atom(b"abc"), atom(b"\"def ghi\""), atom(b"jkl"), cp()],
+        );
+
+        assert_valid_tokens(
+            b"abc ; comment\n def",
+            vec![atom(b"abc"), line_comment(b"; comment"), atom(b"def")],
+        );
+
+        assert_valid_tokens(
+            b"#; x #| abc \n def |#",
+            vec![sc(), atom(b"x"), block_comment(b"#| abc \n def |#")],
+        );
+    }
+
+    #[test]
+    fn test_adjacent_atoms() {
+        assert_valid_tokens(
+            br#"abc"def""ghi"jkl"#,
+            vec![
+                atom(b"abc"),
+                atom(b"\"def\""),
+                atom(b"\"ghi\""),
+                atom(b"jkl"),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_pound_transitions() {
+        assert_valid_tokens(
+            b"#(#)# #\t#\r#\x0C#\n#\"a\"",
+            vec![
+                atom(b"#"),
+                op(),
+                atom(b"#"),
+                cp(),
+                atom(b"#"),
+                atom(b"#"),
+                atom(b"#"),
+                atom(b"#"),
+                atom(b"#"),
+                atom(b"#"),
+                atom(b"\"a\""),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_quoted_atoms() {
+        assert_valid_tokens(
+            br#""""a" "\"a""#,
+            vec![atom(br#""""#), atom(br#""a""#), atom(br#""\"a""#)],
+        );
+
+        assert_valid_tokens(b"\"a\nb#|\"", vec![atom(b"\"a\nb#|\"")]);
+
+        assert_unterminated_quoted_atom(b"\"abc", vec![atom(b"\"abc")]);
+        assert_unterminated_quoted_atom(b"\"abc\\\"", vec![atom(b"\"abc\\\"")]);
+        assert_unterminated_quoted_atom(b"\"abc\n", vec![atom(b"\"abc\n")]);
+    }
+
+    #[test]
+    fn test_block_comments() {
+        assert_valid_tokens(
+            b"#| |# a #| #|c|# |# #|# |#",
+            vec![
+                block_comment(b"#| |#"),
+                atom(b"a"),
+                block_comment(b"#| #|c|# |#"),
+                block_comment(b"#|# |#"),
+            ],
+        );
+
+        assert_valid_tokens(
+            br#"#| "|#" |# a"#,
+            vec![block_comment(b"#| \"|#\" |#"), atom(b"a")],
+        );
+
+        assert_unterminated_block_quote(b"#| #| |#|", vec![block_comment(b"#| #| |#|")]);
+
+        assert_unterminated_block_quote(br#"#|"a\"|#"#, vec![block_comment(b"#|\"a\\\"|#")]);
     }
 }
