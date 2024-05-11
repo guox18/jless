@@ -31,6 +31,7 @@ mod screenwriter;
 mod search;
 mod sexp_tokenizer;
 mod sless;
+mod streaming_json_tokenizer;
 mod terminal;
 mod truncatedstrview;
 mod types;
