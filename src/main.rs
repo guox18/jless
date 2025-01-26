@@ -1,0 +1,212 @@
+use rustyline::history::MemHistory;
+use rustyline::Editor;
+use signal_hook::consts::SIGWINCH;
+use termion::cursor::HideCursor;
+use termion::event::{Event as TermionEvent, Key};
+use termion::input::{MouseTerminal, TermRead};
+use termion::raw::IntoRawMode;
+use termion::screen::IntoAlternateScreen;
+
+use std::io::Read;
+use std::os::unix::net::UnixStream;
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::thread;
+
+fn main() {
+    let (app_input_events_sender, app_input_events_receiver) = mpsc::channel();
+
+    let mut exit_code = 0;
+
+    // Introduce scope to ensure [stdout] gets dropped, and terminal attributes are
+    // restored.
+    {
+        let stdout = std::io::stdout();
+        // Enable raw mode, switch to alternate screen, hide the cursor, and enable mouse input.
+        let stdout = stdout
+            .into_raw_mode()
+            .expect("unable to switch terminal into raw mode");
+        let stdout = stdout
+            .into_alternate_screen()
+            .expect("unable to switch to alternate screen");
+        let stdout = HideCursor::from(stdout);
+        let stdout = MouseTerminal::from(stdout);
+        let mut stdout: Box<dyn std::io::Write> = Box::new(stdout);
+
+        let editor_config = rustyline::config::Config::builder()
+            .keyseq_timeout(Some(0))
+            .behavior(rustyline::Behavior::PreferTerm)
+            .build();
+
+        let mut editor: Editor<(), MemHistory> =
+            Editor::with_history(editor_config, MemHistory::new())
+                .expect("unable to construct rustyline editor");
+
+        // The TTY thread shouldn't be trying to read input while we're processing
+        // the previous bit of input; if the app wants to get user input via rusty
+        // line, then two separate threads will be reading from the same input stream,
+        // and they'll each see every other input. To solve this, we add a condition
+        // variable, that indicates the TTY thread should try to get more input. Once
+        // it gets input, it sets this to false, sends the data to the app thread,
+        // then waits for it to be set to true again. Once the app thread is done,
+        // it sets it to be true, and notifies the TTY thread (via the condvar) that
+        // it can get more input.
+        let should_get_tty_input_mutex = Arc::new(Mutex::new(true));
+        let should_get_tty_input_condvar = Arc::new(Condvar::new());
+
+        // Start threads to:
+        // - listen for SIGWINCH
+        // - get TTY input
+        register_sigwinch_handler(app_input_events_sender.clone());
+        get_tty_input(
+            app_input_events_sender.clone(),
+            should_get_tty_input_mutex.clone(),
+            should_get_tty_input_condvar.clone(),
+        );
+
+        editor.bind_sequence(
+            rustyline::KeyEvent::new('\x1B', rustyline::Modifiers::empty()),
+            rustyline::Cmd::Interrupt,
+        );
+
+        loop {
+            let app_input_event = app_input_events_receiver.recv();
+
+            match &app_input_event {
+                Ok(AppInputEvent::Sigwinch) => {
+                    print!("Got SIGWINCH\r\n");
+                }
+                Ok(AppInputEvent::TTYEvent(event)) => match event {
+                    TermionEvent::Key(Key::Ctrl('c')) => break,
+                    TermionEvent::Key(Key::Char(':')) => {
+                        // These [unwrap]s should be handled once this is moved out of
+                        // a proof-of-concept phase.
+                        write!(stdout, "{}", termion::cursor::Show).unwrap();
+                        let result = editor.readline("Enter command: ");
+                        write!(stdout, "{}", termion::cursor::Hide).unwrap();
+                        print!("\rGot command: {result:?}\r\n");
+                    }
+                    _ => {
+                        print!("Got TTYEvent: {event:?}\r\n");
+                    }
+                },
+                Ok(AppInputEvent::TTYError(io_error)) => {
+                    print!("Got io error from TTY thread: {io_error:?}\r\n");
+                }
+                Err(err) => {
+                    let _: &std::sync::mpsc::RecvError = err;
+                    // https://doc.rust-lang.org/std/sync/mpsc/struct.RecvError.html
+                    //
+                    // > The [recv] operation can only fail if the sending half of a
+                    // > [channel] is disconnected, implying that no further messages
+                    // > will ever be received
+                    //
+                    // We don't expect this should ever happen, so we return an error.
+                    eprintln!("app input events receiver unexpectedly received error");
+                    exit_code = 1;
+                    break;
+                }
+            }
+
+            // If we got a TTY event (or error), tell the TTY thread it can get more
+            // input. (If we got a different kind of event, that means it's already
+            // waiting for input.)
+            match app_input_event {
+                Ok(AppInputEvent::TTYEvent(_) | AppInputEvent::TTYError(_)) => {
+                    *should_get_tty_input_mutex.lock().unwrap() = true;
+                    should_get_tty_input_condvar.notify_one();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    std::process::exit(exit_code);
+}
+
+enum AppInputEvent {
+    Sigwinch,
+    TTYEvent(TermionEvent),
+    TTYError(std::io::Error),
+}
+
+fn register_sigwinch_handler(sender: mpsc::Sender<AppInputEvent>) {
+    let (mut sigwinch_read, sigwinch_write) =
+        UnixStream::pair().expect("unable to create [UnixStream] for sigwinch handler");
+
+    // NOTE: This overrides the SIGWINCH handler registered by rustyline.
+    // We should maybe get a reference to the existing signal handler
+    // and call it when appropriate, but it seems to only be used to handle
+    // line wrapping, and it seems to work fine without it.
+    let _signal_id = signal_hook::low_level::pipe::register(SIGWINCH, sigwinch_write)
+        .expect("unable to register SIGWINCH handler");
+
+    thread::spawn(move || {
+        // [signal_hook] sends a signal byte every time it receives the signal;
+        // we read it into this dummy buffer.
+        let mut buf = [0];
+        loop {
+            // Ignore return error; it's safe to send extra [Sigwinch] events to
+            // the app.
+            let _ = sigwinch_read.read_exact(&mut buf);
+
+            if let Err(_) = sender.send(AppInputEvent::Sigwinch) {
+                // https://doc.rust-lang.org/std/sync/mpsc/struct.SendError.html
+                //
+                // > A send operation can only fail if the receiving end of a channel
+                // > is disconnected, implying that the data could never be received.
+                //
+                // If the receiver has exited, there's no point in sending more data,
+                // so we'll break.
+                break;
+            }
+        }
+    });
+}
+
+fn get_tty_input(
+    sender: mpsc::Sender<AppInputEvent>,
+    should_get_tty_input_mutex: Arc<Mutex<bool>>,
+    should_get_tty_input_condvar: Arc<Condvar>,
+) {
+    // Due to the implementation of termion's [events] function, which reads
+    // a minimum of two bytes so that it can detect solitary ESC presses,
+    // if you copy and paste text starting with ':' (or containing a ':' at
+    // even index technically...), rustyline won't see the first character
+    // after the ':' (but will see everything else), and then once the command
+    // is entered, the first character after the ':' will be processed here
+    // and sent as a key _after_ the command has been entered, i.e., the input
+    // will be received out of order.
+    //
+    // This is not expected to be a common problem.
+    //
+    // Note that somehow neovim detects when you're pasting in input, and inserts
+    // it directly, even if you're just pasting a single character. I don't know
+    // how it does that! Maybe it checks how much data it read and assumes that
+    // if it read more than N bytes it must be pasted data?
+
+    let mut tty_events = termion::get_tty().unwrap().events();
+
+    thread::spawn(move || {
+        let mut should_get_tty_input = should_get_tty_input_mutex.lock().unwrap();
+
+        loop {
+            if *should_get_tty_input {
+                *should_get_tty_input = false;
+
+                let send_result = match tty_events.next() {
+                    None => break,
+                    Some(Ok(event)) => sender.send(AppInputEvent::TTYEvent(event)),
+                    Some(Err(error)) => sender.send(AppInputEvent::TTYError(error)),
+                };
+
+                if let Err(_) = send_result {
+                    break;
+                }
+            }
+
+            should_get_tty_input = should_get_tty_input_condvar
+                .wait_while(should_get_tty_input, |should_get| !*should_get)
+                .unwrap();
+        }
+    });
+}

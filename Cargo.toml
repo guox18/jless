@@ -20,7 +20,9 @@ sexp = []
 # logos = "0.12.0"
 unicode-width = "0.1"
 unicode-segmentation = "1.11"
-rustyline = "14.0"
+# Use a forked version of rustyline with a fix on macOS.
+# When using actual 14.0.0 version, it'll still work, except for not being able to detect single escapes.
+rustyline = { version = "14.0.0", git = "https://github.com/PaulJuliusMartinez/rustyline-with-macos-poll-fix", branch = "v14.0.0.bugfix" }
 regex = "1.10"
 termion = "4.0"
 signal-hook = "0.3"
