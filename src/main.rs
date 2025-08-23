@@ -7,13 +7,16 @@ use termion::input::{MouseTerminal, TermRead};
 use termion::raw::IntoRawMode;
 use termion::screen::IntoAlternateScreen;
 
-use std::io::Read;
+use std::io::{self, Read};
 use std::os::unix::net::UnixStream;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 
 fn main() {
     let (app_input_events_sender, app_input_events_receiver) = mpsc::channel();
+    let (data_buffer_sender, data_buffer_receiver) = mpsc::sync_channel(1);
+
+    let args: Vec<_> = std::env::args_os().into_iter().collect();
 
     let mut exit_code = 0;
 
@@ -42,8 +45,8 @@ fn main() {
                 .expect("unable to construct rustyline editor");
 
         // The TTY thread shouldn't be trying to read input while we're processing
-        // the previous bit of input; if the app wants to get user input via rusty
-        // line, then two separate threads will be reading from the same input stream,
+        // the previous bit of input; if the app wants to get user input via rustyline,
+        // then two separate threads will be reading from the same input stream,
         // and they'll each see every other input. To solve this, we add a condition
         // variable, that indicates the TTY thread should try to get more input. Once
         // it gets input, it sets this to false, sends the data to the app thread,
@@ -56,11 +59,22 @@ fn main() {
         // Start threads to:
         // - listen for SIGWINCH
         // - get TTY input
+        // - read data from stdin/file
         register_sigwinch_handler(app_input_events_sender.clone());
         get_tty_input(
             app_input_events_sender.clone(),
             should_get_tty_input_mutex.clone(),
             should_get_tty_input_condvar.clone(),
+        );
+
+        // 16 bytes for initial testing.
+        let buffer: Vec<u8> = vec![0; 16];
+        data_buffer_sender.send(buffer);
+
+        get_document_data(
+            app_input_events_sender.clone(),
+            data_buffer_receiver,
+            args.get(1).cloned(),
         );
 
         editor.bind_sequence(
@@ -71,7 +85,12 @@ fn main() {
         loop {
             let app_input_event = app_input_events_receiver.recv();
 
-            match &app_input_event {
+            let got_tty_event = matches!(
+                &app_input_event,
+                Ok(AppInputEvent::TTYEvent(_) | AppInputEvent::TTYError(_)),
+            );
+
+            match app_input_event {
                 Ok(AppInputEvent::Sigwinch) => {
                     print!("Got SIGWINCH\r\n");
                 }
@@ -92,8 +111,20 @@ fn main() {
                 Ok(AppInputEvent::TTYError(io_error)) => {
                     print!("Got io error from TTY thread: {io_error:?}\r\n");
                 }
+                Ok(AppInputEvent::DataAvailable(data)) => match data {
+                    Err(err) => print!("Got an error while reading data: {err:?}\r\n"),
+                    Ok(None) => print!("Got EOF from input\r\n"),
+                    Ok(Some(bytes)) => {
+                        match std::str::from_utf8(bytes.as_ref()) {
+                            Ok(s) => print!("Got input data: {s:?}\r\n"),
+                            Err(_) => print!("Got non-UTF8 input data: {bytes:?}\r\n"),
+                        };
+
+                        data_buffer_sender.send(bytes);
+                    }
+                },
                 Err(err) => {
-                    let _: &std::sync::mpsc::RecvError = err;
+                    let _: std::sync::mpsc::RecvError = err;
                     // https://doc.rust-lang.org/std/sync/mpsc/struct.RecvError.html
                     //
                     // > The [recv] operation can only fail if the sending half of a
@@ -101,7 +132,7 @@ fn main() {
                     // > will ever be received
                     //
                     // We don't expect this should ever happen, so we return an error.
-                    eprintln!("app input events receiver unexpectedly received error");
+                    eprint!("app input events receiver unexpectedly received error");
                     exit_code = 1;
                     break;
                 }
@@ -110,12 +141,9 @@ fn main() {
             // If we got a TTY event (or error), tell the TTY thread it can get more
             // input. (If we got a different kind of event, that means it's already
             // waiting for input.)
-            match app_input_event {
-                Ok(AppInputEvent::TTYEvent(_) | AppInputEvent::TTYError(_)) => {
-                    *should_get_tty_input_mutex.lock().unwrap() = true;
-                    should_get_tty_input_condvar.notify_one();
-                }
-                _ => {}
+            if got_tty_event {
+                *should_get_tty_input_mutex.lock().unwrap() = true;
+                should_get_tty_input_condvar.notify_one();
             }
         }
     }
@@ -126,7 +154,8 @@ fn main() {
 enum AppInputEvent {
     Sigwinch,
     TTYEvent(TermionEvent),
-    TTYError(std::io::Error),
+    TTYError(io::Error),
+    DataAvailable(io::Result<Option<Vec<u8>>>),
 }
 
 fn register_sigwinch_handler(sender: mpsc::Sender<AppInputEvent>) {
@@ -141,7 +170,7 @@ fn register_sigwinch_handler(sender: mpsc::Sender<AppInputEvent>) {
         .expect("unable to register SIGWINCH handler");
 
     thread::spawn(move || {
-        // [signal_hook] sends a signal byte every time it receives the signal;
+        // [signal_hook] sends a single byte every time it receives the signal;
         // we read it into this dummy buffer.
         let mut buf = [0];
         loop {
@@ -207,6 +236,54 @@ fn get_tty_input(
             should_get_tty_input = should_get_tty_input_condvar
                 .wait_while(should_get_tty_input, |should_get| !*should_get)
                 .unwrap();
+        }
+    });
+}
+
+fn get_document_data(
+    event_sender: mpsc::Sender<AppInputEvent>,
+    buffer_receiver: mpsc::Receiver<Vec<u8>>,
+    filename: Option<std::ffi::OsString>,
+) {
+    thread::spawn(move || {
+        let filename = match filename
+            .as_ref()
+            .map(std::ffi::OsString::as_os_str)
+            .and_then(std::ffi::OsStr::to_str)
+        {
+            None | Some("-") => None,
+            Some(_) => filename,
+        };
+
+        let mut input: Box<dyn io::Read> = match filename {
+            None => Box::new(std::io::stdin()),
+            Some(filename) => Box::new(std::fs::File::open(filename).unwrap()),
+        };
+
+        loop {
+            let mut buffer = buffer_receiver.recv().unwrap();
+
+            buffer.resize(buffer.capacity(), 0);
+            match input.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = event_sender
+                        .send(AppInputEvent::DataAvailable(Ok(None)))
+                        .unwrap();
+                    break;
+                }
+                Ok(n) => {
+                    buffer.truncate(n);
+                    let _ = event_sender
+                        .send(AppInputEvent::DataAvailable(Ok(Some(buffer))))
+                        .unwrap();
+                }
+                Err(err) => {
+                    let _ = event_sender
+                        .send(AppInputEvent::DataAvailable(Err(err)))
+                        .unwrap();
+                    break;
+                }
+            }
         }
     });
 }
