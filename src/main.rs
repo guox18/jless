@@ -12,6 +12,9 @@ use std::os::unix::net::UnixStream;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 
+mod document;
+mod text_document;
+
 fn main() {
     let (app_input_events_sender, app_input_events_receiver) = mpsc::channel();
     let (data_buffer_sender, data_buffer_receiver) = mpsc::sync_channel(1);
