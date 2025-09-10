@@ -8,8 +8,10 @@
 // and a `ContainerWrapping` can have a `LineWrapping` inside it.
 
 pub trait Document {
-    type ScreenLine: Clone;
-    type Cursor;
+    // `Ord` implementation for `ScreenLine` may panic if we accidentally compare
+    // values before/after a resize.
+    type ScreenLine: Clone + Eq + Ord + std::fmt::Debug;
+    type Cursor: Ord + std::fmt::Debug;
 
     // new(dimensions)?
 
@@ -25,10 +27,17 @@ pub trait Document {
         display_width: usize,
     ) -> Option<(Self::ScreenLine, Self::Cursor)>;
 
-    // Someday: This should be probably stored inside the document (so it can clear any caches?).
     fn next_screen_line(
         &self,
         screen_line: &Self::ScreenLine,
+        // Someday: This should be probably stored inside the document (so it can clear any caches?).
+        display_width: usize,
+    ) -> Option<Self::ScreenLine>;
+
+    fn prev_screen_line(
+        &self,
+        screen_line: &Self::ScreenLine,
+        // Someday: This should be probably stored inside the document (so it can clear any caches?).
         display_width: usize,
     ) -> Option<Self::ScreenLine>;
 
@@ -41,9 +50,93 @@ pub trait Document {
     fn is_after_start_of_wrapped_line(&self, screen_line: &Self::ScreenLine) -> bool;
     fn is_before_end_of_wrapped_line(&self, screen_line: &Self::ScreenLine) -> bool;
 
+    // Someday: Should this return a NonZeroUsize?
+    fn cursor_range(
+        &self,
+        cursor: &Self::Cursor,
+        display_width: usize,
+    ) -> CursorRange<Self::ScreenLine>;
+
+    fn does_screen_line_intersect_cursor(
+        &self,
+        screen_line: &Self::ScreenLine,
+        cursor: &Self::Cursor,
+        display_width: usize,
+    ) -> bool {
+        let CursorRange { start, end, .. } = self.cursor_range(cursor, display_width);
+        start <= *screen_line && *screen_line <= end
+    }
+
+    fn cursor_layout_details(
+        &self,
+        cursor: &Self::Cursor,
+        display_width: usize,
+        bound: usize,
+    ) -> CursorLayoutDetails<Self::ScreenLine> {
+        let range = self.cursor_range(cursor, display_width);
+
+        let mut screen_lines_before = 0;
+        let mut prev_screen_line = range.start.clone();
+        while screen_lines_before < bound {
+            let Some(screen_line) = self.prev_screen_line(&prev_screen_line, display_width) else {
+                break;
+            };
+            screen_lines_before += 1;
+            prev_screen_line = screen_line;
+        }
+        let bounded_doc_screen_lines_before_start = if screen_lines_before <= bound {
+            Some(screen_lines_before)
+        } else {
+            None
+        };
+
+        let mut screen_lines_after = 0;
+        let mut next_screen_line = range.end.clone();
+        while screen_lines_after < bound {
+            let Some(screen_line) = self.next_screen_line(&next_screen_line, display_width) else {
+                break;
+            };
+            screen_lines_after += 1;
+            next_screen_line = screen_line;
+        }
+        let bounded_doc_screen_lines_after_end = if screen_lines_after <= bound {
+            Some(screen_lines_after)
+        } else {
+            None
+        };
+
+        CursorLayoutDetails {
+            range,
+            bounded_doc_screen_lines_before_start,
+            bounded_doc_screen_lines_after_end,
+        }
+    }
+
+    // Actions
+
+    fn move_cursor_down(&self, lines: usize, cursor: &Self::Cursor) -> Option<Self::Cursor>;
+    fn move_cursor_up(&self, lines: usize, cursor: &Self::Cursor) -> Option<Self::Cursor>;
+
     #[cfg(test)]
     fn debug_text_content(&self, screen_line: &Self::ScreenLine) -> &[u8];
+}
 
-    fn move_cursor_up(&self, cursor: &Self::Cursor) -> Option<Self::Cursor>;
-    fn move_cursor_down(&self, cursor: &Self::Cursor) -> Option<Self::Cursor>;
+/// Representation of a `Cursor` in "Screen" space, as a start and end `ScreenLine`, along with how
+/// many `ScreenLine`s the `Cursor` takes up. In the vast majority of cases, when no wrapping is
+/// necessary, `start` will equal `end`, and `num_screen_lines` will be 1.
+pub struct CursorRange<SL> {
+    pub start: SL,
+    pub end: SL,
+    pub num_screen_lines: usize,
+}
+
+/// Computed details used to help reposition the viewport on a specific node pointed to by a
+/// `Cursor`. In addition to containing the actual range of the `Cursor`, it also checks to see if
+/// the focused node is within a certain distance of the start or end of the document. If one
+/// of those values is `None`, that means the start/end of the document is _more_ than some
+/// fixed number of screen lines (usually the height of the viewport) before/after the cursor range.
+pub struct CursorLayoutDetails<SL> {
+    pub range: CursorRange<SL>,
+    pub bounded_doc_screen_lines_before_start: Option<usize>,
+    pub bounded_doc_screen_lines_after_end: Option<usize>,
 }

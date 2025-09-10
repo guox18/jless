@@ -1,9 +1,11 @@
+use std::cmp::{self, Ordering};
 use std::ops::Range;
 use std::rc::Rc;
 
-use crate::document::Document;
+use crate::document::{CursorRange, Document};
 
-// Precalculated break points when displaying a long line
+// Precalculated break points when displaying a long line. Each values represents
+// the starting byte offset of one line.
 // Someday: Maybe save info about whether the range contains non-ASCII, or
 // escaped characters.
 #[derive(Debug)]
@@ -13,6 +15,7 @@ struct BreakPoints(Vec<usize>);
 struct SegmentOfWrappedLine {
     break_points: Rc<BreakPoints>,
     index: usize,
+    width: usize,
 }
 
 impl SegmentOfWrappedLine {
@@ -30,6 +33,37 @@ impl SegmentOfWrappedLine {
 
     fn is_before_end(&self) -> bool {
         self.index < self.break_points.len() - 1
+    }
+
+    fn next_segment(&self) -> Option<SegmentOfWrappedLine> {
+        if self.is_before_end() {
+            Some(SegmentOfWrappedLine {
+                index: self.index + 1,
+                ..self.clone()
+            })
+        } else {
+            None
+        }
+    }
+
+    fn prev_segment(&self) -> Option<SegmentOfWrappedLine> {
+        if self.is_after_start() {
+            Some(SegmentOfWrappedLine {
+                index: self.index - 1,
+                ..self.clone()
+            })
+        } else {
+            None
+        }
+    }
+
+    fn into_last(mut self) -> SegmentOfWrappedLine {
+        self.index = self.break_points.len() - 1;
+        self
+    }
+
+    fn make_last(&self) -> SegmentOfWrappedLine {
+        self.clone().into_last()
     }
 }
 
@@ -74,6 +108,68 @@ pub struct ScreenLine {
     segment_of_wrapped_line: Option<SegmentOfWrappedLine>,
 }
 
+impl PartialEq for ScreenLine {
+    fn eq(&self, other: &Self) -> bool {
+        if self.line_index != other.line_index {
+            return false;
+        }
+
+        match (
+            &self.segment_of_wrapped_line,
+            &other.segment_of_wrapped_line,
+        ) {
+            (None, None) => true,
+            (None, Some(_)) => false,
+            (Some(_), None) => false,
+            (Some(segment1), Some(segment2)) => {
+                segment1.width == segment2.width && segment1.index == segment2.index
+            }
+        }
+    }
+}
+
+impl Eq for ScreenLine {}
+
+impl Ord for ScreenLine {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.line_index.cmp(&other.line_index) {
+            Ordering::Less => return Ordering::Less,
+            Ordering::Greater => return Ordering::Greater,
+            Ordering::Equal => (),
+        }
+
+        match (
+            &self.segment_of_wrapped_line,
+            &other.segment_of_wrapped_line,
+        ) {
+            (None, None) => Ordering::Equal,
+            (Some(segment1), Some(segment2)) => {
+                if segment1.width == segment2.width {
+                    segment1.index.cmp(&segment2.index)
+                } else {
+                    panic!(
+                        "Two TextDocument::ScreenLines were wrapped with different lengths: \
+                            line {}, width1: {}, width2: {}",
+                        self.line_index, segment1.width, segment2.width,
+                    );
+                }
+            }
+            (None, Some(_)) | (Some(_), None) => {
+                panic!(
+                    "Two TextDocument::ScreenLines point to the same line ({}), but only one is wrapped",
+                    self.line_index,
+                );
+            }
+        }
+    }
+}
+
+impl PartialOrd for ScreenLine {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 // Cursor is just a plain line number
 pub type Cursor = usize;
 
@@ -106,6 +202,10 @@ impl TextDocument {
         self.trailing_newline
     }
 
+    pub fn cursor_to_line_n(&self, n: usize) -> Cursor {
+        n - 1
+    }
+
     fn create_ref_to_start_of_line(&self, line_index: usize, display_width: usize) -> ScreenLine {
         let line = self.line_zero_indexed(line_index);
         let segment_of_wrapped_line = match BreakPoints::calculate(line, display_width) {
@@ -113,12 +213,24 @@ impl TextDocument {
             Some(break_points) => Some(SegmentOfWrappedLine {
                 break_points: Rc::new(break_points),
                 index: 0,
+                width: display_width,
             }),
         };
 
         ScreenLine {
             line_index,
             segment_of_wrapped_line,
+        }
+    }
+
+    fn create_ref_to_end_of_line(&self, line_index: usize, display_width: usize) -> ScreenLine {
+        let start_of_line = self.create_ref_to_start_of_line(line_index, display_width);
+        match start_of_line.segment_of_wrapped_line {
+            None => start_of_line,
+            Some(start_segment) => ScreenLine {
+                segment_of_wrapped_line: Some(start_segment.into_last()),
+                ..start_of_line
+            },
         }
     }
 
@@ -129,6 +241,7 @@ impl TextDocument {
             Some(SegmentOfWrappedLine {
                 break_points,
                 index,
+                width: _,
             }) => break_points.nth_segment(full_line, *index),
         }
     }
@@ -194,24 +307,50 @@ impl Document for TextDocument {
                     Some(self.create_ref_to_start_of_line(next_line_index, display_width))
                 }
             }
-            Some(SegmentOfWrappedLine {
-                break_points,
-                index,
-            }) => {
-                if *index + 1 < break_points.len() {
-                    Some(ScreenLine {
-                        line_index: screen_line.line_index,
-                        segment_of_wrapped_line: Some(SegmentOfWrappedLine {
-                            break_points: Rc::clone(break_points),
-                            index: *index + 1,
-                        }),
-                    })
-                } else if next_line_index == num_lines {
+            Some(segment_of_wrapped_line) => match segment_of_wrapped_line.next_segment() {
+                Some(next_segment) => Some(ScreenLine {
+                    line_index: screen_line.line_index,
+                    segment_of_wrapped_line: Some(next_segment),
+                }),
+                None => {
+                    if next_line_index == num_lines {
+                        None
+                    } else {
+                        Some(self.create_ref_to_start_of_line(next_line_index, display_width))
+                    }
+                }
+            },
+        }
+    }
+
+    fn prev_screen_line(
+        &self,
+        screen_line: &ScreenLine,
+        display_width: usize,
+    ) -> Option<ScreenLine> {
+        let prev_line_index = screen_line.line_index.saturating_sub(1);
+
+        match &screen_line.segment_of_wrapped_line {
+            None => {
+                if screen_line.line_index == 0 {
                     None
                 } else {
-                    Some(self.create_ref_to_start_of_line(next_line_index, display_width))
+                    Some(self.create_ref_to_end_of_line(prev_line_index, display_width))
                 }
             }
+            Some(segment_of_wrapped_line) => match segment_of_wrapped_line.prev_segment() {
+                Some(prev_segment) => Some(ScreenLine {
+                    line_index: screen_line.line_index,
+                    segment_of_wrapped_line: Some(prev_segment),
+                }),
+                None => {
+                    if screen_line.line_index == 0 {
+                        None
+                    } else {
+                        Some(self.create_ref_to_end_of_line(prev_line_index, display_width))
+                    }
+                }
+            },
         }
     }
 
@@ -251,26 +390,50 @@ impl Document for TextDocument {
             .map_or(false, SegmentOfWrappedLine::is_before_end)
     }
 
-    #[cfg(test)]
-    fn debug_text_content(&self, screen_line: &Self::ScreenLine) -> &[u8] {
-        self.screen_line_contents(screen_line)
+    fn cursor_range(&self, cursor: &Cursor, display_width: usize) -> CursorRange<ScreenLine> {
+        let start = self.create_ref_to_start_of_line(*cursor, display_width);
+        let end = match &start.segment_of_wrapped_line {
+            None => start.clone(),
+            Some(segment_of_wrapped_line) => ScreenLine {
+                line_index: start.line_index,
+                segment_of_wrapped_line: Some(segment_of_wrapped_line.make_last()),
+            },
+        };
+
+        let num_screen_lines = match &start.segment_of_wrapped_line {
+            None => 1,
+            Some(SegmentOfWrappedLine { break_points, .. }) => break_points.len(),
+        };
+
+        CursorRange {
+            start,
+            end,
+            num_screen_lines,
+        }
     }
 
-    fn move_cursor_up(&self, cursor: &Cursor) -> Option<Cursor> {
+    // Actions
+
+    fn move_cursor_down(&self, lines: usize, cursor: &Cursor) -> Option<Cursor> {
+        let max_line = self.num_lines() - 1;
+        if *cursor == max_line {
+            None
+        } else {
+            Some(cmp::min(*cursor + lines, max_line))
+        }
+    }
+
+    fn move_cursor_up(&self, lines: usize, cursor: &Cursor) -> Option<Cursor> {
         if *cursor == 0 {
             None
         } else {
-            Some(*cursor - 1)
+            Some(cursor.saturating_sub(lines))
         }
     }
 
-    fn move_cursor_down(&self, cursor: &Cursor) -> Option<Cursor> {
-        let next = *cursor + 1;
-        if next >= self.num_lines() {
-            None
-        } else {
-            Some(next)
-        }
+    #[cfg(test)]
+    fn debug_text_content(&self, screen_line: &Self::ScreenLine) -> &[u8] {
+        self.screen_line_contents(screen_line)
     }
 }
 
@@ -357,22 +520,27 @@ mod tests {
         let mut s = String::new();
         let mut screen_line = Some(doc.init_top_screen_line_and_cursor(width).unwrap().0);
 
-        while let Some(line) = screen_line {
+        while let Some(line) = &screen_line {
             write!(
                 s,
                 "|{: <width$}",
-                doc.screen_line_contents(&line).as_bstr(),
+                doc.screen_line_contents(line).as_bstr(),
                 width = width,
-            );
-            writeln!(s, "|");
-            screen_line = doc.next_screen_line(&line, width);
+            )
+            .unwrap();
+            writeln!(s, "|").unwrap();
+            let next_screen_line = doc.next_screen_line(line, width);
+            if let Some(next_screen_line) = &next_screen_line {
+                assert_eq!(screen_line, doc.prev_screen_line(next_screen_line, width));
+            }
+            screen_line = next_screen_line
         }
 
         s
     }
 
     #[test]
-    fn test_next_line() {
+    fn test_next_and_prev_line() {
         let mut doc = TextDocument::new();
         doc.append(b"line.1\n");
         //           0123456789012345
