@@ -1,5 +1,5 @@
 use std::cmp;
-use std::ops::Range;
+use std::ops::RangeInclusive;
 
 use crate::document::{CursorRange, Document};
 
@@ -39,13 +39,13 @@ struct AcceptableStartScreenIndexesToShowCursorNode {
     last_screen_index: usize,
     #[allow(dead_code)]
     #[cfg(debug_assertions)]
-    range_after_considering_scrolloff: Range<usize>,
+    range_after_considering_scrolloff: RangeInclusive<usize>,
     #[allow(dead_code)]
     #[cfg(debug_assertions)]
-    range_after_considering_start_and_end_of_document: Range<usize>,
+    range_after_considering_start_and_end_of_document: RangeInclusive<usize>,
     #[allow(dead_code)]
     #[cfg(debug_assertions)]
-    range_after_expanding_due_to_cursor_height: Range<usize>,
+    range_after_expanding_due_to_cursor_height: RangeInclusive<usize>,
     // The actual fields
     start: usize,
     end: usize,
@@ -252,7 +252,7 @@ impl<D: Document> DocumentViewport<D> {
 
         #[cfg(debug_assertions)]
         let range_after_considering_scrolloff =
-            first_acceptable_screen_index..last_acceptable_screen_index;
+            first_acceptable_screen_index..=last_acceptable_screen_index;
 
         // Now we take into account the start/end of the document, where we don't enforce the
         // scrolloff setting. If we enforce scrolloff at the top of the file, then we'd have
@@ -282,7 +282,7 @@ impl<D: Document> DocumentViewport<D> {
 
         #[cfg(debug_assertions)]
         let range_after_considering_start_and_end_of_document =
-            first_acceptable_screen_index..last_acceptable_screen_index;
+            first_acceptable_screen_index..=last_acceptable_screen_index;
 
         // Now we need to expand the acceptable range based on the height of the cursor, up
         // to the whole size of the screen again.
@@ -346,7 +346,7 @@ impl<D: Document> DocumentViewport<D> {
 
         #[cfg(debug_assertions)]
         let range_after_expanding_due_to_cursor_height =
-            first_acceptable_screen_index..last_acceptable_screen_index;
+            first_acceptable_screen_index..=last_acceptable_screen_index;
 
         // Final step: convert the acceptable screen index range into an acceptable
         // range for the start of the cursor.
@@ -598,9 +598,9 @@ mod test {
         AcceptableStartScreenIndexesToShowCursorNode {
             cursor_height: 4,
             last_screen_index: 9,
-            range_after_considering_scrolloff: 0..9,
-            range_after_considering_start_and_end_of_document: 0..9,
-            range_after_expanding_due_to_cursor_height: 0..9,
+            range_after_considering_scrolloff: 0..=9,
+            range_after_considering_start_and_end_of_document: 0..=9,
+            range_after_expanding_due_to_cursor_height: 0..=9,
             start: 0,
             end: 6,
         }
@@ -611,9 +611,9 @@ mod test {
         AcceptableStartScreenIndexesToShowCursorNode {
             cursor_height: 4,
             last_screen_index: 9,
-            range_after_considering_scrolloff: 3..6,
-            range_after_considering_start_and_end_of_document: 1..6,
-            range_after_expanding_due_to_cursor_height: 1..6,
+            range_after_considering_scrolloff: 3..=6,
+            range_after_considering_start_and_end_of_document: 1..=6,
+            range_after_expanding_due_to_cursor_height: 1..=6,
             start: 1,
             end: 3,
         }
@@ -641,9 +641,9 @@ mod test {
         AcceptableStartScreenIndexesToShowCursorNode {
             cursor_height: 8,
             last_screen_index: 9,
-            range_after_considering_scrolloff: 4..5,
-            range_after_considering_start_and_end_of_document: 1..5,
-            range_after_expanding_due_to_cursor_height: 1..8,
+            range_after_considering_scrolloff: 4..=5,
+            range_after_considering_start_and_end_of_document: 1..=5,
+            range_after_expanding_due_to_cursor_height: 1..=8,
             start: 1,
             end: 1,
         }
@@ -674,9 +674,9 @@ mod test {
                 AcceptableStartScreenIndexesToShowCursorNode {
                     cursor_height: 0,
                     last_screen_index: 2,
-                    range_after_considering_scrolloff: 0..2,
-                    range_after_considering_start_and_end_of_document: 0..2,
-                    range_after_expanding_due_to_cursor_height: 0..2,
+                    range_after_considering_scrolloff: 0..=2,
+                    range_after_considering_start_and_end_of_document: 0..=2,
+                    range_after_expanding_due_to_cursor_height: 0..=2,
                     start: 0,
                     end: 0,
                 }
@@ -707,9 +707,9 @@ mod test {
                 AcceptableStartScreenIndexesToShowCursorNode {
                     cursor_height: 0,
                     last_screen_index: 3,
-                    range_after_considering_scrolloff: 0..3,
-                    range_after_considering_start_and_end_of_document: 0..3,
-                    range_after_expanding_due_to_cursor_height: 0..3,
+                    range_after_considering_scrolloff: 0..=3,
+                    range_after_considering_start_and_end_of_document: 0..=3,
+                    range_after_expanding_due_to_cursor_height: 0..=3,
                     start: 0,
                     end: 0,
                 }
