@@ -412,6 +412,15 @@ impl Document for TextDocument {
         }
     }
 
+    fn convert_screen_line_to_cursor(
+        &self,
+        screen_line: Self::ScreenLine,
+        _prev_cursor: &Self::Cursor,
+        _display_width: usize,
+    ) -> Self::Cursor {
+        screen_line.line_index
+    }
+
     // Actions
 
     fn move_cursor_down(&self, lines: usize, cursor: &Cursor) -> Option<Cursor> {

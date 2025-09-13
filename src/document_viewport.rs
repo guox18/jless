@@ -25,7 +25,7 @@ pub struct DocumentViewport<D: Document> {
     // what it's set to, and what the scrolloff functionally is
     // if it's set to value >= height / 2.
     //
-    // Access the functional value via .scrolloff().
+    // Access the functional value via .effective_scrolloff().
     scrolloff_setting: usize,
 }
 
@@ -70,6 +70,20 @@ impl<D: Document> DocumentViewport<D> {
         self.scrolloff_setting = scrolloff;
     }
 
+    // Cap scrolloff at half the size of the screen.
+    //
+    // Height | Scrolloff | Min between edge of screen and cursor
+    //   15   |     3     |                  3
+    //   15   |     7     |                  7
+    //   15   |     8     |                  7
+    //   16   |     7     |                  7
+    //   16   |     8     |                  7
+    //   17   |     8     |                  8
+    fn effective_scrolloff(&self) -> usize {
+        cmp::min(self.scrolloff_setting, (self.dimensions.1 - 1) / 2)
+    }
+
+    // If the last line of the file appears before `screen_index`, this will return `None`.
     fn screen_line_at_screen_index(
         &self,
         doc: &D,
@@ -83,12 +97,70 @@ impl<D: Document> DocumentViewport<D> {
         Some(curr_line)
     }
 
+    // If the last line of the file appears before `screen_index`, this will return the
+    // last line of the file.
+    fn last_screen_line_at_or_before_screen_index(
+        &self,
+        doc: &D,
+        mut screen_index: usize,
+    ) -> D::ScreenLine {
+        let mut curr_line = self.top_line.clone();
+        while screen_index > 0 {
+            let Some(next_screen_line) = doc.next_screen_line(&curr_line, self.dimensions.0) else {
+                return curr_line;
+            };
+            curr_line = next_screen_line;
+            screen_index -= 1;
+        }
+        curr_line
+    }
+
     pub fn move_cursor_down(&mut self, doc: &D, lines: usize) {
         self.update_so_new_cursor_is_visible(doc, doc.move_cursor_down(lines, &self.current_focus));
     }
 
     pub fn move_cursor_up(&mut self, doc: &D, lines: usize) {
         self.update_so_new_cursor_is_visible(doc, doc.move_cursor_up(lines, &self.current_focus));
+    }
+
+    pub fn scroll_viewport_down(&mut self, doc: &D, mut lines: usize) {
+        let mut lines_scrolled = 0;
+        let mut next_top_line = self.top_line.clone();
+        while lines > 0 {
+            match doc.next_screen_line(&next_top_line, self.dimensions.0) {
+                None => break,
+                Some(line) => {
+                    lines -= 1;
+                    lines_scrolled += 1;
+                    next_top_line = line;
+                }
+            }
+        }
+
+        if lines_scrolled > 0 {
+            self.top_line = next_top_line;
+            self.maybe_update_focused_node_after_scroll(doc);
+        }
+    }
+
+    pub fn scroll_viewport_up(&mut self, doc: &D, mut lines: usize) {
+        let mut lines_scrolled = 0;
+        let mut next_top_line = self.top_line.clone();
+        while lines > 0 {
+            match doc.prev_screen_line(&next_top_line, self.dimensions.0) {
+                None => break,
+                Some(line) => {
+                    lines -= 1;
+                    lines_scrolled += 1;
+                    next_top_line = line;
+                }
+            }
+        }
+
+        if lines_scrolled > 0 {
+            self.top_line = next_top_line;
+            self.maybe_update_focused_node_after_scroll(doc);
+        }
     }
 
     fn update_so_new_cursor_is_visible(&mut self, doc: &D, new_cursor: Option<D::Cursor>) {
@@ -132,7 +204,7 @@ impl<D: Document> DocumentViewport<D> {
 
         if cursor_start_is_before_first_acceptable_start {
             // Cursor is too close to the top of the screen (or past it); move the viewport so
-            // the cursort is at the start of the acceptable range.
+            // the cursor is at the start of the acceptable range.
             self.top_line = self.n_screen_lines_before(doc, cursor_range.start, start_index);
         } else if cursor_start_is_at_or_before_last_acceptable_start {
             // Nothing to do, the cursor is in an acceptable range!
@@ -170,17 +242,7 @@ impl<D: Document> DocumentViewport<D> {
         let last_screen_index = self.dimensions.1 - 1;
         let mut last_acceptable_screen_index = last_screen_index;
 
-        // Cap scrolloff at half the size of the screen.
-        //
-        // Height | Scrolloff | Min between edge of screen and cursor
-        //   15   |     3     |                  3
-        //   15   |     7     |                  7
-        //   15   |     8     |                  7
-        //   16   |     7     |                  7
-        //   16   |     8     |                  7
-        //   17   |     8     |                  8
-        let min_screenlines_between_edge_of_screen_and_cursor =
-            cmp::min(self.scrolloff_setting, (self.dimensions.1 - 1) / 2);
+        let min_screenlines_between_edge_of_screen_and_cursor = self.effective_scrolloff();
 
         // Shrink the acceptable range based on the scrolloff setting. (Because we capped
         // scrolloff at half the height of the screen, that ensures this doesn't cause
@@ -314,6 +376,54 @@ impl<D: Document> DocumentViewport<D> {
         };
 
         (cursor_layout_details.range, acceptable_start_indexes)
+    }
+
+    fn maybe_update_focused_node_after_scroll(&mut self, doc: &D) {
+        // When scrolling, we'll allow scrolling wrapped lines partly off the screen as long
+        // as any part of the focused node still obeys the scrolloff setting.
+        let min_screenlines_between_edge_of_screen_and_cursor = self.effective_scrolloff();
+
+        let first_acceptable_screen_index = if doc.is_first_screen_line_of_document(&self.top_line)
+        {
+            0
+        } else {
+            min_screenlines_between_edge_of_screen_and_cursor
+        };
+
+        let last_screen_index = self.dimensions.1 - 1;
+        let last_acceptable_screen_index =
+            last_screen_index - min_screenlines_between_edge_of_screen_and_cursor;
+
+        // Using `last_screen_line_at_or_before_screen_index` handles the case when the end
+        // of the file is on screen. In the extreme example, consider if the last line of the
+        // document is at the top of the screen. If the screen is 10 lines tall, and scrolloff
+        // is 3, then the first/last acceptable screen indexes will be 3 and 6, but the first
+        // and last acceptable screen line will both be the current top line, which is the last
+        // line of the document.
+
+        let first_acceptable_screen_line =
+            self.last_screen_line_at_or_before_screen_index(doc, first_acceptable_screen_index);
+        let last_acceptable_screen_line =
+            self.last_screen_line_at_or_before_screen_index(doc, last_acceptable_screen_index);
+
+        let focused_range = doc.cursor_range(&self.current_focus, self.dimensions.0);
+
+        if focused_range.end < first_acceptable_screen_line {
+            self.current_focus = doc.convert_screen_line_to_cursor(
+                first_acceptable_screen_line,
+                &self.current_focus,
+                self.dimensions.0,
+            );
+        } else if last_acceptable_screen_line < focused_range.start {
+            self.current_focus = doc.convert_screen_line_to_cursor(
+                last_acceptable_screen_line,
+                &self.current_focus,
+                self.dimensions.0,
+            );
+        } else {
+            // Current focused range overlaps with acceptable screen line ranges;
+            // nothing to do!
+        }
     }
 
     // Assumes that this will always exist.
@@ -706,7 +816,6 @@ mod test {
         ");
 
         viewport.move_cursor_down(&doc, 2);
-        let line_4 = doc.cursor_to_line_n(4);
         assert_snapshot!(viewport.render(&doc), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 2 │ bb   │
@@ -748,6 +857,208 @@ mod test {
         │ 3│ 8 │ hh   │
         │ 4│*9 │ i    │
         └──┴───┴──────┘
+        ");
+    }
+
+    #[test]
+    fn test_scroll_up_and_down() {
+        let (doc, mut viewport) = init(
+            b"aaa\nbb\ncccc\ndddddd\neeeeeee\nff\nggggg\nhh\ni\n",
+            4,
+            5,
+            1,
+        );
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬──────┐
+        │ 0│*1 │ aaa  │
+        │ 1│ 2 │ bb   │
+        │ 2│ 3 │ cccc │
+        │ 3│ 4 │ dddd↩│
+        │ 4│ 4 │↪dd   │
+        └──┴───┴──────┘
+        ");
+
+        viewport.scroll_viewport_down(&doc, 1);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬──────┐
+        │ 0│ 2 │ bb   │
+        │ 1│*3 │ cccc │
+        │ 2│ 4 │ dddd↩│
+        │ 3│ 4 │↪dd   │
+        │ 4│ 5 │ eeee↩│
+        └──┴───┴──────┘
+        ");
+
+        viewport.scroll_viewport_down(&doc, 1);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬──────┐
+        │ 0│ 3 │ cccc │
+        │ 1│*4 │ dddd↩│
+        │ 2│*4 │↪dd   │
+        │ 3│ 5 │ eeee↩│
+        │ 4│ 5 │↪eee  │
+        └──┴───┴──────┘
+        ");
+
+        viewport.scroll_viewport_down(&doc, 1);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬──────┐
+        │ 0│*4 │ dddd↩│
+        │ 1│*4 │↪dd   │
+        │ 2│ 5 │ eeee↩│
+        │ 3│ 5 │↪eee  │
+        │ 4│ 6 │ ff   │
+        └──┴───┴──────┘
+        ");
+
+        viewport.scroll_viewport_down(&doc, 1);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬──────┐
+        │ 0│ 4 │↪dd   │
+        │ 1│*5 │ eeee↩│
+        │ 2│*5 │↪eee  │
+        │ 3│ 6 │ ff   │
+        │ 4│ 7 │ gggg↩│
+        └──┴───┴──────┘
+        ");
+
+        viewport.scroll_viewport_down(&doc, 10);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬──────┐
+        │ 0│*9 │ i    │
+        │ 1│ ~ │      │
+        │ 2│ ~ │      │
+        │ 3│ ~ │      │
+        │ 4│ ~ │      │
+        └──┴───┴──────┘
+        ");
+
+        viewport.scroll_viewport_up(&doc, 4);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬──────┐
+        │ 0│ 6 │ ff   │
+        │ 1│ 7 │ gggg↩│
+        │ 2│ 7 │↪g    │
+        │ 3│*8 │ hh   │
+        │ 4│ 9 │ i    │
+        └──┴───┴──────┘
+        ");
+
+        viewport.scroll_viewport_up(&doc, 1);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬──────┐
+        │ 0│ 5 │↪eee  │
+        │ 1│ 6 │ ff   │
+        │ 2│*7 │ gggg↩│
+        │ 3│*7 │↪g    │
+        │ 4│ 8 │ hh   │
+        └──┴───┴──────┘
+        ");
+
+        viewport.scroll_viewport_up(&doc, 1);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬──────┐
+        │ 0│ 5 │ eeee↩│
+        │ 1│ 5 │↪eee  │
+        │ 2│ 6 │ ff   │
+        │ 3│*7 │ gggg↩│
+        │ 4│*7 │↪g    │
+        └──┴───┴──────┘
+        ");
+
+        viewport.scroll_viewport_up(&doc, 1);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬──────┐
+        │ 0│ 4 │↪dd   │
+        │ 1│ 5 │ eeee↩│
+        │ 2│ 5 │↪eee  │
+        │ 3│*6 │ ff   │
+        │ 4│ 7 │ gggg↩│
+        └──┴───┴──────┘
+        ");
+
+        viewport.scroll_viewport_up(&doc, 10);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬──────┐
+        │ 0│ 1 │ aaa  │
+        │ 1│ 2 │ bb   │
+        │ 2│ 3 │ cccc │
+        │ 3│*4 │ dddd↩│
+        │ 4│*4 │↪dd   │
+        └──┴───┴──────┘
+        ");
+    }
+
+    #[test]
+    fn test_scrolling_with_very_long_line() {
+        let (doc, mut viewport) = init(b"a\nb\nc1c2c3c4c5c6c7c8\nd\ne\n", 2, 4, 1);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬────┐
+        │ 0│*1 │ a  │
+        │ 1│ 2 │ b  │
+        │ 2│ 3 │ c1↩│
+        │ 3│ 3 │↪c2↩│
+        └──┴───┴────┘
+        ");
+
+        viewport.scroll_viewport_down(&doc, 2);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬────┐
+        │ 0│*3 │ c1↩│
+        │ 1│*3 │↪c2↩│
+        │ 2│*3 │↪c3↩│
+        │ 3│*3 │↪c4↩│
+        └──┴───┴────┘
+        ");
+
+        viewport.scroll_viewport_down(&doc, 4);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬────┐
+        │ 0│*3 │↪c5↩│
+        │ 1│*3 │↪c6↩│
+        │ 2│*3 │↪c7↩│
+        │ 3│*3 │↪c8 │
+        └──┴───┴────┘
+        ");
+
+        viewport.scroll_viewport_down(&doc, 2);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬────┐
+        │ 0│*3 │↪c7↩│
+        │ 1│*3 │↪c8 │
+        │ 2│ 4 │ d  │
+        │ 3│ 5 │ e  │
+        └──┴───┴────┘
+        ");
+
+        viewport.scroll_viewport_down(&doc, 1);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬────┐
+        │ 0│ 3 │↪c8 │
+        │ 1│*4 │ d  │
+        │ 2│ 5 │ e  │
+        │ 3│ ~ │    │
+        └──┴───┴────┘
+        ");
+
+        viewport.scroll_viewport_up(&doc, 2);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬────┐
+        │ 0│*3 │↪c6↩│
+        │ 1│*3 │↪c7↩│
+        │ 2│*3 │↪c8 │
+        │ 3│ 4 │ d  │
+        └──┴───┴────┘
+        ");
+
+        viewport.scroll_viewport_up(&doc, 7);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬────┐
+        │ 0│ 1 │ a  │
+        │ 1│ 2 │ b  │
+        │ 2│*3 │ c1↩│
+        │ 3│*3 │↪c2↩│
+        └──┴───┴────┘
         ");
     }
 }

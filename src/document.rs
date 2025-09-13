@@ -44,11 +44,18 @@ pub trait Document {
     // 1-indexed
     fn line_number(&self, screen_line: &Self::ScreenLine) -> usize;
 
+    // Someday: Why aren't these methods on a ScreenLine trait? Do they need to take
+    // in a Document?
     fn is_wrapped_line(&self, screen_line: &Self::ScreenLine) -> bool;
     fn is_start_of_wrapped_line(&self, screen_line: &Self::ScreenLine) -> bool;
     fn is_end_of_wrapped_line(&self, screen_line: &Self::ScreenLine) -> bool;
     fn is_after_start_of_wrapped_line(&self, screen_line: &Self::ScreenLine) -> bool;
     fn is_before_end_of_wrapped_line(&self, screen_line: &Self::ScreenLine) -> bool;
+
+    fn is_first_screen_line_of_document(&self, screen_line: &Self::ScreenLine) -> bool {
+        self.line_number(screen_line) == 1
+            && (!self.is_wrapped_line(screen_line) || self.is_start_of_wrapped_line(screen_line))
+    }
 
     // Someday: Should this return a NonZeroUsize?
     fn cursor_range(
@@ -111,6 +118,15 @@ pub trait Document {
             bounded_doc_screen_lines_after_end,
         }
     }
+
+    // If a `Document` supports multiple focused lines within a single `ScreenLine`, then it
+    // should return a new cursor with similar horizontal positioning as `prev_cursor`.
+    fn convert_screen_line_to_cursor(
+        &self,
+        screen_line: Self::ScreenLine,
+        prev_cursor: &Self::Cursor,
+        display_width: usize,
+    ) -> Self::Cursor;
 
     // Actions
 
