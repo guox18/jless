@@ -1,3 +1,5 @@
+use crate::dimensions::Dimensions;
+
 // Misc. notes:
 //
 // Maybe want:
@@ -13,33 +15,20 @@ pub trait Document {
     type ScreenLine: Clone + Eq + Ord + std::fmt::Debug;
     type Cursor: Ord + std::fmt::Debug;
 
-    // new(dimensions)?
+    fn new(width: usize) -> Self;
+    fn width(&self) -> usize;
+    fn resize(&mut self, new_width: usize);
 
     fn append(&mut self, data: &[u8]);
     fn eof(&mut self);
 
     // Someday: This initialization is clumsy, but we need to know how
     // many lines there are before we know how much space we'll have...
-    // Someday: The "lines" here and the "line ref" below are different lines; I need to come
-    // up with different words.
-    fn init_top_screen_line_and_cursor(
-        &self,
-        display_width: usize,
-    ) -> Option<(Self::ScreenLine, Self::Cursor)>;
+    fn top_screen_line_and_cursor(&self) -> Option<(Self::ScreenLine, Self::Cursor)>;
 
-    fn next_screen_line(
-        &self,
-        screen_line: &Self::ScreenLine,
-        // Someday: This should be probably stored inside the document (so it can clear any caches?).
-        display_width: usize,
-    ) -> Option<Self::ScreenLine>;
+    fn next_screen_line(&self, screen_line: &Self::ScreenLine) -> Option<Self::ScreenLine>;
 
-    fn prev_screen_line(
-        &self,
-        screen_line: &Self::ScreenLine,
-        // Someday: This should be probably stored inside the document (so it can clear any caches?).
-        display_width: usize,
-    ) -> Option<Self::ScreenLine>;
+    fn prev_screen_line(&self, screen_line: &Self::ScreenLine) -> Option<Self::ScreenLine>;
 
     // 1-indexed
     fn line_number(&self, screen_line: &Self::ScreenLine) -> usize;
@@ -58,34 +47,28 @@ pub trait Document {
     }
 
     // Someday: Should this return a NonZeroUsize?
-    fn cursor_range(
-        &self,
-        cursor: &Self::Cursor,
-        display_width: usize,
-    ) -> CursorRange<Self::ScreenLine>;
+    fn cursor_range(&self, cursor: &Self::Cursor) -> CursorRange<Self::ScreenLine>;
 
     fn does_screen_line_intersect_cursor(
         &self,
         screen_line: &Self::ScreenLine,
         cursor: &Self::Cursor,
-        display_width: usize,
     ) -> bool {
-        let CursorRange { start, end, .. } = self.cursor_range(cursor, display_width);
+        let CursorRange { start, end, .. } = self.cursor_range(cursor);
         start <= *screen_line && *screen_line <= end
     }
 
     fn cursor_layout_details(
         &self,
         cursor: &Self::Cursor,
-        display_width: usize,
         bound: usize,
     ) -> CursorLayoutDetails<Self::ScreenLine> {
-        let range = self.cursor_range(cursor, display_width);
+        let range = self.cursor_range(cursor);
 
         let mut screen_lines_before = 0;
         let mut prev_screen_line = range.start.clone();
         while screen_lines_before < bound {
-            let Some(screen_line) = self.prev_screen_line(&prev_screen_line, display_width) else {
+            let Some(screen_line) = self.prev_screen_line(&prev_screen_line) else {
                 break;
             };
             screen_lines_before += 1;
@@ -100,7 +83,7 @@ pub trait Document {
         let mut screen_lines_after = 0;
         let mut next_screen_line = range.end.clone();
         while screen_lines_after < bound {
-            let Some(screen_line) = self.next_screen_line(&next_screen_line, display_width) else {
+            let Some(screen_line) = self.next_screen_line(&next_screen_line) else {
                 break;
             };
             screen_lines_after += 1;
@@ -125,7 +108,6 @@ pub trait Document {
         &self,
         screen_line: Self::ScreenLine,
         prev_cursor: &Self::Cursor,
-        display_width: usize,
     ) -> Self::Cursor;
 
     // Actions

@@ -1,6 +1,7 @@
 use std::cmp;
 use std::ops::RangeInclusive;
 
+use crate::dimensions::Dimensions;
 use crate::document::{CursorRange, Document};
 
 /// The `DocumentViewport` manages what part of a document is displayed on screen
@@ -17,9 +18,7 @@ use crate::document::{CursorRange, Document};
 pub struct DocumentViewport<D: Document> {
     top_line: D::ScreenLine,
     current_focus: D::Cursor,
-
-    // Someday: This needs to be a struct; right now it's (width, height).
-    dimensions: (usize, usize),
+    dimensions: Dimensions,
 
     // We call this scrolloff_setting, to differentiate between
     // what it's set to, and what the scrolloff functionally is
@@ -55,7 +54,7 @@ impl<D: Document> DocumentViewport<D> {
     pub fn new(
         first_line: D::ScreenLine,
         initial_cursor: D::Cursor,
-        dimensions: (usize, usize),
+        dimensions: Dimensions,
         scrolloff: usize,
     ) -> Self {
         DocumentViewport {
@@ -80,7 +79,7 @@ impl<D: Document> DocumentViewport<D> {
     //   16   |     8     |                  7
     //   17   |     8     |                  8
     fn effective_scrolloff(&self) -> usize {
-        cmp::min(self.scrolloff_setting, (self.dimensions.1 - 1) / 2)
+        cmp::min(self.scrolloff_setting, (self.dimensions.height - 1) / 2)
     }
 
     // If the last line of the file appears before `screen_index`, this will return `None`.
@@ -91,7 +90,7 @@ impl<D: Document> DocumentViewport<D> {
     ) -> Option<D::ScreenLine> {
         let mut curr_line = self.top_line.clone();
         while screen_index > 0 {
-            curr_line = doc.next_screen_line(&curr_line, self.dimensions.0)?;
+            curr_line = doc.next_screen_line(&curr_line)?;
             screen_index -= 1;
         }
         Some(curr_line)
@@ -106,7 +105,7 @@ impl<D: Document> DocumentViewport<D> {
     ) -> D::ScreenLine {
         let mut curr_line = self.top_line.clone();
         while screen_index > 0 {
-            let Some(next_screen_line) = doc.next_screen_line(&curr_line, self.dimensions.0) else {
+            let Some(next_screen_line) = doc.next_screen_line(&curr_line) else {
                 return curr_line;
             };
             curr_line = next_screen_line;
@@ -127,7 +126,7 @@ impl<D: Document> DocumentViewport<D> {
         let mut lines_scrolled = 0;
         let mut next_top_line = self.top_line.clone();
         while lines > 0 {
-            match doc.next_screen_line(&next_top_line, self.dimensions.0) {
+            match doc.next_screen_line(&next_top_line) {
                 None => break,
                 Some(line) => {
                     lines -= 1;
@@ -147,7 +146,7 @@ impl<D: Document> DocumentViewport<D> {
         let mut lines_scrolled = 0;
         let mut next_top_line = self.top_line.clone();
         while lines > 0 {
-            match doc.prev_screen_line(&next_top_line, self.dimensions.0) {
+            match doc.prev_screen_line(&next_top_line) {
                 None => break,
                 Some(line) => {
                     lines -= 1;
@@ -234,12 +233,11 @@ impl<D: Document> DocumentViewport<D> {
         //
         // Once we have this range, we will snap the position of the cursor into that range.
 
-        let cursor_layout_details =
-            doc.cursor_layout_details(&cursor, self.dimensions.0, self.dimensions.1 - 1);
+        let cursor_layout_details = doc.cursor_layout_details(&cursor, self.dimensions.height - 1);
 
         // Initial acceptable range is the whole screen.
         let mut first_acceptable_screen_index = 0;
-        let last_screen_index = self.dimensions.1 - 1;
+        let last_screen_index = self.dimensions.height - 1;
         let mut last_acceptable_screen_index = last_screen_index;
 
         let min_screenlines_between_edge_of_screen_and_cursor = self.effective_scrolloff();
@@ -291,11 +289,11 @@ impl<D: Document> DocumentViewport<D> {
             last_acceptable_screen_index - first_acceptable_screen_index + 1;
         let cursor_height = cursor_layout_details.range.num_screen_lines;
 
-        if cursor_height >= self.dimensions.1 {
+        if cursor_height >= self.dimensions.height {
             // Simple case, the cursor is as big or bigger than the screen, so the whole screen
             // is available.
             first_acceptable_screen_index = 0;
-            last_acceptable_screen_index = self.dimensions.1 - 1;
+            last_acceptable_screen_index = self.dimensions.height - 1;
         } else if cursor_height > height_of_acceptable_range {
             let mut additional_space_needed = cursor_height - height_of_acceptable_range;
             let space_to_reclaim_at_start = first_acceptable_screen_index;
@@ -390,7 +388,7 @@ impl<D: Document> DocumentViewport<D> {
             min_screenlines_between_edge_of_screen_and_cursor
         };
 
-        let last_screen_index = self.dimensions.1 - 1;
+        let last_screen_index = self.dimensions.height - 1;
         let last_acceptable_screen_index =
             last_screen_index - min_screenlines_between_edge_of_screen_and_cursor;
 
@@ -406,20 +404,14 @@ impl<D: Document> DocumentViewport<D> {
         let last_acceptable_screen_line =
             self.last_screen_line_at_or_before_screen_index(doc, last_acceptable_screen_index);
 
-        let focused_range = doc.cursor_range(&self.current_focus, self.dimensions.0);
+        let focused_range = doc.cursor_range(&self.current_focus);
 
         if focused_range.end < first_acceptable_screen_line {
-            self.current_focus = doc.convert_screen_line_to_cursor(
-                first_acceptable_screen_line,
-                &self.current_focus,
-                self.dimensions.0,
-            );
+            self.current_focus = doc
+                .convert_screen_line_to_cursor(first_acceptable_screen_line, &self.current_focus);
         } else if last_acceptable_screen_line < focused_range.start {
-            self.current_focus = doc.convert_screen_line_to_cursor(
-                last_acceptable_screen_line,
-                &self.current_focus,
-                self.dimensions.0,
-            );
+            self.current_focus =
+                doc.convert_screen_line_to_cursor(last_acceptable_screen_line, &self.current_focus);
         } else {
             // Current focused range overlaps with acceptable screen line ranges;
             // nothing to do!
@@ -434,9 +426,7 @@ impl<D: Document> DocumentViewport<D> {
         mut n: usize,
     ) -> D::ScreenLine {
         while n > 0 {
-            screen_line = doc
-                .prev_screen_line(&screen_line, self.dimensions.0)
-                .unwrap();
+            screen_line = doc.prev_screen_line(&screen_line).unwrap();
             n -= 1;
         }
         screen_line
@@ -449,8 +439,7 @@ impl<D: Document> DocumentViewport<D> {
         ViewportLinesIterator {
             document,
             next_line: Some(self.top_line.clone()),
-            remaining_height: self.dimensions.1,
-            display_width: self.dimensions.0,
+            remaining_height: self.dimensions.height,
         }
     }
 }
@@ -459,7 +448,6 @@ struct ViewportLinesIterator<'a, D: Document> {
     document: &'a D,
     next_line: Option<D::ScreenLine>,
     remaining_height: usize,
-    display_width: usize,
 }
 
 impl<'a, D: Document> Iterator for ViewportLinesIterator<'a, D> {
@@ -475,9 +463,7 @@ impl<'a, D: Document> Iterator for ViewportLinesIterator<'a, D> {
             return Some(None);
         };
 
-        self.next_line = self
-            .document
-            .next_screen_line(&curr_line, self.display_width);
+        self.next_line = self.document.next_screen_line(&curr_line);
 
         Some(Some(curr_line))
     }
@@ -492,6 +478,7 @@ mod test {
 
     use std::fmt::Write;
 
+    use crate::dimensions::Dimensions;
     use crate::text_document::{Cursor, TextDocument};
 
     fn init(
@@ -500,12 +487,13 @@ mod test {
         height: usize,
         scrolloff: usize,
     ) -> (TextDocument, DocumentViewport<TextDocument>) {
-        let mut doc = TextDocument::new();
+        let mut doc = TextDocument::new(width);
         doc.append(contents);
         doc.eof();
 
-        let (top_line, initial_cursor) = doc.init_top_screen_line_and_cursor(width).unwrap();
-        let viewport = DocumentViewport::new(top_line, initial_cursor, (width, height), scrolloff);
+        let (top_line, initial_cursor) = doc.top_screen_line_and_cursor().unwrap();
+        let dimensions = Dimensions { width, height };
+        let viewport = DocumentViewport::new(top_line, initial_cursor, dimensions, scrolloff);
 
         (doc, viewport)
     }
@@ -514,7 +502,7 @@ mod test {
         fn render(&self, doc: &D) -> String {
             // |12345678       9|
             // | ##|##| <width> |
-            let content_width = self.dimensions.0;
+            let content_width = self.dimensions.width;
             let mut s = String::new();
             writeln!(s, "┌SI┬─L#┬─{:─<content_width$}─┐", "").unwrap();
             for (screen_index, screen_line) in self.viewport_lines(doc).enumerate() {
@@ -523,11 +511,8 @@ mod test {
                     continue;
                 };
 
-                let is_focused = doc.does_screen_line_intersect_cursor(
-                    &screen_line,
-                    &self.current_focus,
-                    self.dimensions.0,
-                );
+                let is_focused =
+                    doc.does_screen_line_intersect_cursor(&screen_line, &self.current_focus);
                 let line_number = doc.line_number(&screen_line);
                 let wraps_from_prev_line = doc.is_after_start_of_wrapped_line(&screen_line);
                 let wraps_onto_next_line = doc.is_before_end_of_wrapped_line(&screen_line);

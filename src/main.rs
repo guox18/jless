@@ -12,6 +12,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 
+mod dimensions;
 mod document;
 mod document_viewport;
 mod text_document;
