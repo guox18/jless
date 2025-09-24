@@ -50,6 +50,13 @@ struct AcceptableStartScreenIndexesToShowCursorNode {
     end: usize,
 }
 
+#[derive(Debug, Copy, Clone)]
+enum PositionOfScreenLine {
+    AboveTopLine,
+    AtScreenIndex(usize),
+    BelowBottomLine,
+}
+
 impl<D: Document> DocumentViewport<D> {
     pub fn new(
         first_line: D::ScreenLine,
@@ -112,6 +119,31 @@ impl<D: Document> DocumentViewport<D> {
             screen_index -= 1;
         }
         curr_line
+    }
+
+    fn position_of_screen_line(
+        &self,
+        doc: &D,
+        screen_line: &D::ScreenLine,
+    ) -> PositionOfScreenLine {
+        if screen_line < &self.top_line {
+            return PositionOfScreenLine::AboveTopLine;
+        }
+
+        let mut screen_index = 0;
+        let mut curr_screen_line = self.top_line.clone();
+        while screen_index < self.dimensions.height {
+            if *screen_line == curr_screen_line {
+                return PositionOfScreenLine::AtScreenIndex(screen_index);
+            }
+
+            screen_index += 1;
+            curr_screen_line = doc
+                .next_screen_line(&curr_screen_line)
+                .expect("[screen_line] should exist after top line and before EOF");
+        }
+
+        PositionOfScreenLine::BelowBottomLine
     }
 
     pub fn move_cursor_down(&mut self, doc: &D, lines: usize) {
@@ -376,11 +408,10 @@ impl<D: Document> DocumentViewport<D> {
         (cursor_layout_details.range, acceptable_start_indexes)
     }
 
-    fn maybe_update_focused_node_after_scroll(&mut self, doc: &D) {
-        // When scrolling, we'll allow scrolling wrapped lines partly off the screen as long
-        // as any part of the focused node still obeys the scrolloff setting.
+    fn screen_indexes_within_scrolloff(&self, doc: &D) -> RangeInclusive<usize> {
         let min_screenlines_between_edge_of_screen_and_cursor = self.effective_scrolloff();
 
+        // If the top of the screen is the top of the document, we don't enforce scrolloff.
         let first_acceptable_screen_index = if doc.is_first_screen_line_of_document(&self.top_line)
         {
             0
@@ -392,6 +423,14 @@ impl<D: Document> DocumentViewport<D> {
         let last_acceptable_screen_index =
             last_screen_index - min_screenlines_between_edge_of_screen_and_cursor;
 
+        first_acceptable_screen_index..=last_acceptable_screen_index
+    }
+
+    fn maybe_update_focused_node_after_scroll(&mut self, doc: &D) {
+        // When scrolling, we'll allow scrolling wrapped lines partly off the screen as long
+        // as any part of the focused node still obeys the scrolloff setting.
+        let acceptable_screen_indexes = self.screen_indexes_within_scrolloff(doc);
+
         // Using `last_screen_line_at_or_before_screen_index` handles the case when the end
         // of the file is on screen. In the extreme example, consider if the last line of the
         // document is at the top of the screen. If the screen is 10 lines tall, and scrolloff
@@ -399,10 +438,10 @@ impl<D: Document> DocumentViewport<D> {
         // and last acceptable screen line will both be the current top line, which is the last
         // line of the document.
 
-        let first_acceptable_screen_line =
-            self.last_screen_line_at_or_before_screen_index(doc, first_acceptable_screen_index);
+        let first_acceptable_screen_line = self
+            .last_screen_line_at_or_before_screen_index(doc, *acceptable_screen_indexes.start());
         let last_acceptable_screen_line =
-            self.last_screen_line_at_or_before_screen_index(doc, last_acceptable_screen_index);
+            self.last_screen_line_at_or_before_screen_index(doc, *acceptable_screen_indexes.end());
 
         let focused_range = doc.cursor_range(&self.current_focus);
 
@@ -418,6 +457,213 @@ impl<D: Document> DocumentViewport<D> {
         }
     }
 
+    pub fn resize(&mut self, doc: &mut D, new_dimensions: Dimensions) {
+        // Handle resizes in two parts: first resize the width, then the height.
+        self.resize_width(doc, new_dimensions.width);
+        self.resize_height(doc, new_dimensions.height);
+        self.move_current_focus_within_scrolloff_after_resize(doc);
+    }
+
+    fn update_dimensions_and_resize_doc(&mut self, doc: &mut D, dimensions: Dimensions) {
+        doc.resize(dimensions.width);
+        self.dimensions = dimensions;
+    }
+
+    fn resize_width(&mut self, doc: &mut D, new_width: usize) {
+        if new_width == self.dimensions.width {
+            return;
+        }
+
+        let new_dimensions = Dimensions {
+            width: new_width,
+            ..self.dimensions
+        };
+
+        let old_cursor_range = doc.cursor_range(&self.current_focus);
+        let start_position = self.position_of_screen_line(doc, &old_cursor_range.start);
+        let end_position = self.position_of_screen_line(doc, &old_cursor_range.end);
+
+        match (start_position, end_position) {
+            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::AboveTopLine) => {
+                panic!("entirety of focused node is before the start of the screen");
+            }
+            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::AtScreenIndex(index)) => {
+                // Don't top line to keep anchored, so we'll keep the end of the line
+                // in the same place.
+                self.update_dimensions_and_resize_doc(doc, new_dimensions);
+                let new_cursor_range = doc.cursor_range(&self.current_focus);
+                self.top_line =
+                    self.n_screen_lines_before_or_top_of_doc(doc, new_cursor_range.end, index);
+            }
+            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::BelowBottomLine) => {
+                let lines_above_top_of_screen =
+                    doc.diff_screen_lines(&self.top_line, &old_cursor_range.start);
+                let lines_below_bottom_of_screen = doc
+                    .diff_screen_lines(&old_cursor_range.end, &self.top_line)
+                    - self.dimensions.height;
+
+                self.update_dimensions_and_resize_doc(doc, new_dimensions);
+                let new_cursor_range = doc.cursor_range(&self.current_focus);
+
+                if old_cursor_range.num_screen_lines == new_cursor_range.num_screen_lines {
+                    // If the cursor is the same number of lines long, then we'll keep the lines in
+                    // the same spot.
+                    self.top_line = self.n_screen_lines_after(
+                        doc,
+                        new_cursor_range.start,
+                        lines_above_top_of_screen,
+                    );
+                } else {
+                    // If the size of the cursor changed, we'll try to keep the content
+                    // near the center of the screen in approximately the same place.
+                    //
+                    // For example, if the focused node took up 100 screen lines before,
+                    // and lines 70-90 were on screen, that means the 80% percentile of
+                    // the node was in the middle of the screen. If, after the resize, it
+                    // takes up 60 screen lines, then we want screen line 48 in the middle
+                    // of the screen, so the screen will show lines 38-58. This is all
+                    // very approximate, so I'm not worried too much about off-by-one errors.
+                    let percentile_of_cursor_in_middle_of_screen: f64 = ((lines_above_top_of_screen
+                        as f64)
+                        + (self.dimensions.height as f64 / 2.0))
+                        / (old_cursor_range.num_screen_lines as f64);
+                    let new_cursor_index_in_middle_of_screen: usize =
+                        (percentile_of_cursor_in_middle_of_screen
+                            * (new_cursor_range.num_screen_lines as f64))
+                            as usize;
+
+                    let screen_line_in_middle_of_screen = self.n_screen_lines_after(
+                        doc,
+                        new_cursor_range.start,
+                        new_cursor_index_in_middle_of_screen,
+                    );
+                    self.top_line = self.n_screen_lines_before_or_top_of_doc(
+                        doc,
+                        screen_line_in_middle_of_screen,
+                        self.dimensions.height / 2,
+                    );
+                }
+            }
+            (PositionOfScreenLine::AtScreenIndex(index), _) => {
+                self.update_dimensions_and_resize_doc(doc, new_dimensions);
+                let new_cursor_range = doc.cursor_range(&self.current_focus);
+                self.top_line =
+                    self.n_screen_lines_before_or_top_of_doc(doc, new_cursor_range.start, index);
+            }
+            (PositionOfScreenLine::BelowBottomLine, _) => {
+                panic!("entirety of focused node is past the end of the screen");
+            }
+        }
+    }
+
+    fn resize_height(&mut self, doc: &mut D, new_height: usize) {
+        let old_height = self.dimensions.height;
+        if new_height == old_height {
+            return;
+        }
+
+        // We'll go with vim's approach of keeping the focused in the same percentile of the
+        // screen.
+
+        let anchor_screen_line;
+        let new_index;
+
+        let convert_old_index_to_new_index = |index| -> usize {
+            // We do `old_height - 1` so that when we're using the last line as an anchor, it'll
+            // stay the last line.
+            let percentile = (index as f64) / ((old_height - 1) as f64);
+            (percentile * ((new_height - 1) as f64)).round() as usize
+        };
+
+        let cursor_range = doc.cursor_range(&self.current_focus);
+        let start_position = self.position_of_screen_line(doc, &cursor_range.start);
+        let end_position = self.position_of_screen_line(doc, &cursor_range.end);
+
+        match (start_position, end_position) {
+            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::AboveTopLine) => {
+                panic!("entirety of focused node is before the start of the screen");
+            }
+            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::AtScreenIndex(index)) => {
+                // Keep the end of focused node in the same percentile
+                anchor_screen_line = cursor_range.end;
+                new_index = convert_old_index_to_new_index(index);
+            }
+            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::BelowBottomLine) => {
+                // Keep middle of what's visible on screen in the middle.
+                let half_old_height = self.dimensions.height / 2;
+                anchor_screen_line = self
+                    .screen_line_at_screen_index(doc, half_old_height)
+                    .unwrap();
+                new_index = new_height / 2;
+            }
+            (PositionOfScreenLine::AtScreenIndex(index), PositionOfScreenLine::AboveTopLine) => {
+                panic!("start of focused node is on screen, but bottom is above the top line");
+            }
+            (
+                PositionOfScreenLine::AtScreenIndex(start_index),
+                PositionOfScreenLine::AtScreenIndex(end_index),
+            ) => {
+                // Keep the middle of focused node in the same percentile.
+                let middle_index = (start_index + end_index) / 2;
+                anchor_screen_line = self.screen_line_at_screen_index(doc, middle_index).unwrap();
+                new_index = convert_old_index_to_new_index(middle_index);
+            }
+            (PositionOfScreenLine::AtScreenIndex(index), PositionOfScreenLine::BelowBottomLine) => {
+                // Keep the start of focused node in the same percentile.
+                anchor_screen_line = cursor_range.start;
+                new_index = convert_old_index_to_new_index(index);
+            }
+            (PositionOfScreenLine::BelowBottomLine, _) => {
+                panic!("entirety of focused node is past the end of the screen");
+            }
+        }
+
+        self.top_line =
+            self.n_screen_lines_before_or_top_of_doc(doc, anchor_screen_line, new_index);
+
+        self.dimensions = Dimensions {
+            height: new_height,
+            ..self.dimensions
+        };
+    }
+
+    fn move_current_focus_within_scrolloff_after_resize(&mut self, doc: &D) {
+        // After a resize, we'll allow part of the focused node to be outside of scrolloff,
+        // but if that's not the case we'll move the screen slightly to make it so.
+        let acceptable_screen_indexes = self.screen_indexes_within_scrolloff(doc);
+
+        // We use `last_screen_line_at_or_before_screen_index` in `maybe_update_focused_node_after_scroll`
+        // to allow scrolling the end of the file to the very top of the screen. We'll use the same
+        // relaxation here, so that if you do that, and the resize the screen, the cursor won't
+        // "jump" into the scrolloff zone.
+
+        let first_acceptable_screen_line = self
+            .last_screen_line_at_or_before_screen_index(doc, *acceptable_screen_indexes.start());
+        let last_acceptable_screen_line =
+            self.last_screen_line_at_or_before_screen_index(doc, *acceptable_screen_indexes.end());
+
+        let focused_range = doc.cursor_range(&self.current_focus);
+
+        if focused_range.end < first_acceptable_screen_line {
+            // Put the end of the focused range at the first acceptable screen index.
+            self.top_line = self.n_screen_lines_before(
+                doc,
+                focused_range.end,
+                *acceptable_screen_indexes.start(),
+            );
+        } else if last_acceptable_screen_line < focused_range.start {
+            // Put the start of the focused range at the last acceptable screen index.
+            self.top_line = self.n_screen_lines_before(
+                doc,
+                focused_range.start,
+                *acceptable_screen_indexes.end(),
+            );
+        } else {
+            // Current focused range overlaps with acceptable screen line ranges;
+            // nothing to do!
+        }
+    }
+
     // Assumes that this will always exist.
     fn n_screen_lines_before(
         &self,
@@ -427,6 +673,36 @@ impl<D: Document> DocumentViewport<D> {
     ) -> D::ScreenLine {
         while n > 0 {
             screen_line = doc.prev_screen_line(&screen_line).unwrap();
+            n -= 1;
+        }
+        screen_line
+    }
+
+    fn n_screen_lines_before_or_top_of_doc(
+        &self,
+        doc: &D,
+        mut screen_line: D::ScreenLine,
+        mut n: usize,
+    ) -> D::ScreenLine {
+        while n > 0 {
+            let Some(prev_screen_line) = doc.prev_screen_line(&screen_line) else {
+                return screen_line;
+            };
+            screen_line = prev_screen_line;
+            n -= 1;
+        }
+        screen_line
+    }
+
+    // Assumes that this will always exist
+    fn n_screen_lines_after(
+        &self,
+        doc: &D,
+        mut screen_line: D::ScreenLine,
+        mut n: usize,
+    ) -> D::ScreenLine {
+        while n > 0 {
+            screen_line = doc.next_screen_line(&screen_line).unwrap();
             n -= 1;
         }
         screen_line
@@ -1044,6 +1320,338 @@ mod test {
         │ 2│*3 │ c1↩│
         │ 3│*3 │↪c2↩│
         └──┴───┴────┘
+        ");
+    }
+
+    #[test]
+    fn test_resize_width() {
+        let text = b"a\n\
+            b\n\
+            c\n\
+            d\n\
+            1eeee2eeee3eeee4e!ee5eeee6eeee7eeee8eeee9eeee0eeee\n\
+            f\n\
+            g\n\
+            h\n\
+            i\n";
+        let (mut doc, mut viewport) = init(text, 5, 5, 0);
+        viewport.move_cursor_down(&doc, 4);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬───────┐
+        │ 0│*5 │ 1eeee↩│
+        │ 1│*5 │↪2eeee↩│
+        │ 2│*5 │↪3eeee↩│
+        │ 3│*5 │↪4e!ee↩│
+        │ 4│*5 │↪5eeee↩│
+        └──┴───┴───────┘
+        ");
+        viewport.scroll_viewport_down(&doc, 6);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬───────┐
+        │ 0│*5 │↪7eeee↩│
+        │ 1│*5 │↪8eeee↩│
+        │ 2│*5 │↪9eeee↩│
+        │ 3│*5 │↪0eeee │
+        │ 4│ 6 │ f     │
+        └──┴───┴───────┘
+        ");
+
+        // start AboveTopLine, end AtScreenIndex case, keep end of cursor in same spot
+        viewport.resize_width(&mut doc, 25);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬───────────────────────────┐
+        │ 0│ 3 │ c                         │
+        │ 1│ 4 │ d                         │
+        │ 2│*5 │ 1eeee2eeee3eeee4e!ee5eeee↩│
+        │ 3│*5 │↪6eeee7eeee8eeee9eeee0eeee │
+        │ 4│ 6 │ f                         │
+        └──┴───┴───────────────────────────┘
+        ");
+
+        // start AtScreenIndex case, keep start of cursor in same spot
+        viewport.resize_width(&mut doc, 5);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬───────┐
+        │ 0│ 3 │ c     │
+        │ 1│ 4 │ d     │
+        │ 2│*5 │ 1eeee↩│
+        │ 3│*5 │↪2eeee↩│
+        │ 4│*5 │↪3eeee↩│
+        └──┴───┴───────┘
+        ");
+
+        viewport.scroll_viewport_down(&doc, 3);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬───────┐
+        │ 0│*5 │↪2eeee↩│
+        │ 1│*5 │↪3eeee↩│
+        │ 2│*5 │↪4e!ee↩│
+        │ 3│*5 │↪5eeee↩│
+        │ 4│*5 │↪6eeee↩│
+        └──┴───┴───────┘
+        ");
+
+        // Now we're showing chars 6-30 on screen, so char 18 out of 50 is in the middle, aka 36th
+        // percentile. If we make the screen 2 chars wide, we should see that in the middle of the
+        // screen.
+
+        viewport.resize_width(&mut doc, 2);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬────┐
+        │ 0│*5 │↪ee↩│
+        │ 1│*5 │↪e4↩│
+        │ 2│*5 │↪e!↩│
+        │ 3│*5 │↪ee↩│
+        │ 4│*5 │↪5e↩│
+        └──┴───┴────┘
+        ");
+
+        viewport.resize_width(&mut doc, 3);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬─────┐
+        │ 0│*5 │↪e3e↩│
+        │ 1│*5 │↪eee↩│
+        │ 2│*5 │↪4e!↩│
+        │ 3│*5 │↪ee5↩│
+        │ 4│*5 │↪eee↩│
+        └──┴───┴─────┘
+        ");
+
+        viewport.resize_width(&mut doc, 4);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬──────┐
+        │ 0│*5 │↪ee3e↩│
+        │ 1│*5 │↪eee4↩│
+        │ 2│*5 │↪e!ee↩│
+        │ 3│*5 │↪5eee↩│
+        │ 4│*5 │↪e6ee↩│
+        └──┴───┴──────┘
+        ");
+
+        viewport.resize_width(&mut doc, 5);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬───────┐
+        │ 0│*5 │↪2eeee↩│
+        │ 1│*5 │↪3eeee↩│
+        │ 2│*5 │↪4e!ee↩│
+        │ 3│*5 │↪5eeee↩│
+        │ 4│*5 │↪6eeee↩│
+        └──┴───┴───────┘
+        ");
+
+        // Guess there's a slight off-by-one here, but seems fine.
+        viewport.resize_width(&mut doc, 6);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬────────┐
+        │ 0│*5 │↪eeee3e↩│
+        │ 1│*5 │↪eee4e!↩│
+        │ 2│*5 │↪ee5eee↩│
+        │ 3│*5 │↪e6eeee↩│
+        │ 4│*5 │↪7eeee8↩│
+        └──┴───┴────────┘
+        ");
+    }
+
+    #[test]
+    fn test_resize_height() {
+        let text = b"a\n\
+            b\n\
+            c\n\
+            d\n\
+            1ee2ee3ee4ee5ee6ee7ee8ee9ee0ee\n\
+            f\n\
+            g\n\
+            h\n\
+            i\n";
+        let (mut doc, mut viewport) = init(text, 3, 5, 0);
+        viewport.move_cursor_down(&doc, 4);
+        viewport.scroll_viewport_up(&doc, 1);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬─────┐
+        │ 0│ 4 │ d   │
+        │ 1│*5 │ 1ee↩│
+        │ 2│*5 │↪2ee↩│
+        │ 3│*5 │↪3ee↩│
+        │ 4│*5 │↪4ee↩│
+        └──┴───┴─────┘
+        ");
+
+        viewport.resize_height(&mut doc, 10);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬─────┐
+        │ 0│ 3 │ c   │
+        │ 1│ 4 │ d   │
+        │ 2│*5 │ 1ee↩│
+        │ 3│*5 │↪2ee↩│
+        │ 4│*5 │↪3ee↩│
+        │ 5│*5 │↪4ee↩│
+        │ 6│*5 │↪5ee↩│
+        │ 7│*5 │↪6ee↩│
+        │ 8│*5 │↪7ee↩│
+        │ 9│*5 │↪8ee↩│
+        └──┴───┴─────┘
+        ");
+
+        let (mut doc, mut viewport) = init(text, 3, 5, 0);
+        viewport.move_cursor_down(&doc, 4);
+        viewport.scroll_viewport_down(&doc, 8);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬─────┐
+        │ 0│*5 │↪9ee↩│
+        │ 1│*5 │↪0ee │
+        │ 2│ 6 │ f   │
+        │ 3│ 7 │ g   │
+        │ 4│ 8 │ h   │
+        └──┴───┴─────┘
+        ");
+
+        viewport.resize_height(&mut doc, 10);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬─────┐
+        │ 0│*5 │↪8ee↩│
+        │ 1│*5 │↪9ee↩│
+        │ 2│*5 │↪0ee │
+        │ 3│ 6 │ f   │
+        │ 4│ 7 │ g   │
+        │ 5│ 8 │ h   │
+        │ 6│ 9 │ i   │
+        │ 7│ ~ │     │
+        │ 8│ ~ │     │
+        │ 9│ ~ │     │
+        └──┴───┴─────┘
+        ");
+
+        let (mut doc, mut viewport) = init(text, 3, 5, 0);
+        viewport.move_cursor_down(&doc, 4);
+        viewport.scroll_viewport_down(&doc, 1);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬─────┐
+        │ 0│*5 │↪2ee↩│
+        │ 1│*5 │↪3ee↩│
+        │ 2│*5 │↪4ee↩│
+        │ 3│*5 │↪5ee↩│
+        │ 4│*5 │↪6ee↩│
+        └──┴───┴─────┘
+        ");
+        viewport.resize_height(&mut doc, 3);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬─────┐
+        │ 0│*5 │↪3ee↩│
+        │ 1│*5 │↪4ee↩│
+        │ 2│*5 │↪5ee↩│
+        └──┴───┴─────┘
+        ");
+
+        let (mut doc, mut viewport) = init(text, 10, 5, 0);
+        viewport.move_cursor_down(&doc, 4);
+        viewport.scroll_viewport_down(&doc, 1);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬────────────┐
+        │ 0│ 4 │ d          │
+        │ 1│*5 │ 1ee2ee3ee4↩│
+        │ 2│*5 │↪ee5ee6ee7e↩│
+        │ 3│*5 │↪e8ee9ee0ee │
+        │ 4│ 6 │ f          │
+        └──┴───┴────────────┘
+        ");
+        viewport.resize_height(&mut doc, 7);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬────────────┐
+        │ 0│ 3 │ c          │
+        │ 1│ 4 │ d          │
+        │ 2│*5 │ 1ee2ee3ee4↩│
+        │ 3│*5 │↪ee5ee6ee7e↩│
+        │ 4│*5 │↪e8ee9ee0ee │
+        │ 5│ 6 │ f          │
+        │ 6│ 7 │ g          │
+        └──┴───┴────────────┘
+        ");
+    }
+
+    #[test]
+    fn test_resize() {
+        let text = b"\
+            01\n02\n03\n04\n55\n06\n07\n08\n09\n10\n\
+            11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n";
+        let (mut doc, mut viewport) = init(text, 3, 15, 0);
+        viewport.move_cursor_down(&doc, 13);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬─────┐
+        │ 0│ 1 │ 01  │
+        │ 1│ 2 │ 02  │
+        │ 2│ 3 │ 03  │
+        │ 3│ 4 │ 04  │
+        │ 4│ 5 │ 55  │
+        │ 5│ 6 │ 06  │
+        │ 6│ 7 │ 07  │
+        │ 7│ 8 │ 08  │
+        │ 8│ 9 │ 09  │
+        │ 9│ 10│ 10  │
+        │10│ 11│ 11  │
+        │11│ 12│ 12  │
+        │12│ 13│ 13  │
+        │13│*14│ 14  │
+        │14│ 15│ 15  │
+        └──┴───┴─────┘
+        ");
+
+        let new_dimensions = Dimensions {
+            width: 3,
+            height: 4,
+        };
+        viewport.resize(&mut doc, new_dimensions);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬─────┐
+        │ 0│ 11│ 11  │
+        │ 1│ 12│ 12  │
+        │ 2│ 13│ 13  │
+        │ 3│*14│ 14  │
+        └──┴───┴─────┘
+        ");
+
+        // Same as above, but now with scrolloff = 1; the new cursor position obeys scrolloff.
+        let (mut doc, mut viewport) = init(text, 3, 15, 1);
+        viewport.move_cursor_down(&doc, 13);
+        viewport.resize(&mut doc, new_dimensions);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬─────┐
+        │ 0│ 12│ 12  │
+        │ 1│ 13│ 13  │
+        │ 2│*14│ 14  │
+        │ 3│ 15│ 15  │
+        └──┴───┴─────┘
+        ");
+
+        let text = b"a\nb\nc\nd\nxxxxxxxxxxxxxxxxxxxx\ne\nf\ng\n";
+        let (mut doc, mut viewport) = init(text, 3, 5, 2);
+        viewport.move_cursor_down(&doc, 3);
+        viewport.scroll_viewport_down(&doc, 2);
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬─────┐
+        │ 0│ 4 │ d   │
+        │ 1│*5 │ xxx↩│
+        │ 2│*5 │↪xxx↩│
+        │ 3│*5 │↪xxx↩│
+        │ 4│*5 │↪xxx↩│
+        └──┴───┴─────┘
+        ");
+
+        // Anchor point is second line, but snaps into viewport.
+        viewport.resize(
+            &mut doc,
+            Dimensions {
+                width: 30,
+                height: 5,
+            },
+        );
+        assert_snapshot!(viewport.render(&doc), @r"
+        ┌SI┬─L#┬────────────────────────────────┐
+        │ 0│ 3 │ c                              │
+        │ 1│ 4 │ d                              │
+        │ 2│*5 │ xxxxxxxxxxxxxxxxxxxx           │
+        │ 3│ 6 │ e                              │
+        │ 4│ 7 │ f                              │
+        └──┴───┴────────────────────────────────┘
         ");
     }
 }

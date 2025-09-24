@@ -1,5 +1,3 @@
-use crate::dimensions::Dimensions;
-
 // Misc. notes:
 //
 // Maybe want:
@@ -109,6 +107,19 @@ pub trait Document {
         screen_line: Self::ScreenLine,
         prev_cursor: &Self::Cursor,
     ) -> Self::Cursor;
+
+    fn diff_screen_lines(&self, a: &Self::ScreenLine, b: &Self::ScreenLine) -> usize {
+        debug_assert!(a >= b);
+        let mut diff = 0;
+        let mut t = a.clone();
+        while t != *b {
+            t = self
+                .prev_screen_line(&t)
+                .expect("a <= b, but never found b after a");
+            diff += 1;
+        }
+        diff
+    }
 
     // Actions
 
