@@ -12,10 +12,16 @@ use std::os::unix::net::UnixStream;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 
+mod app;
 mod dimensions;
 mod document;
 mod document_viewport;
 mod text_document;
+// Someday: This is temporary, will probably want to rewrite this.
+mod terminal;
+
+use app::{App, Break};
+use document::Document;
 
 fn main() {
     let (app_input_events_sender, app_input_events_receiver) = mpsc::channel();
@@ -87,6 +93,10 @@ fn main() {
             rustyline::Cmd::Interrupt,
         );
 
+        let dimensions = dimensions::current();
+        let text_document = text_document::TextDocument::new(dimensions.width);
+        let mut app = App::new(text_document, editor, dimensions, stdout);
+
         loop {
             let app_input_event = app_input_events_receiver.recv();
 
@@ -96,37 +106,21 @@ fn main() {
             );
 
             match app_input_event {
-                Ok(AppInputEvent::Sigwinch) => {
-                    print!("Got SIGWINCH\r\n");
-                }
-                Ok(AppInputEvent::TTYEvent(event)) => match event {
-                    TermionEvent::Key(Key::Ctrl('c')) => break,
-                    TermionEvent::Key(Key::Char(':')) => {
-                        // These [unwrap]s should be handled once this is moved out of
-                        // a proof-of-concept phase.
-                        write!(stdout, "{}", termion::cursor::Show).unwrap();
-                        let result = editor.readline("Enter command: ");
-                        write!(stdout, "{}", termion::cursor::Hide).unwrap();
-                        print!("\rGot command: {result:?}\r\n");
-                    }
-                    _ => {
-                        print!("Got TTYEvent: {event:?}\r\n");
-                    }
+                Ok(AppInputEvent::Sigwinch) => app.handle_window_resize(dimensions::current()),
+                Ok(AppInputEvent::TTYEvent(tty_event)) => match app.handle_tty_event(tty_event) {
+                    Some(Break) => break,
+                    None => (),
                 },
-                Ok(AppInputEvent::TTYError(io_error)) => {
-                    print!("Got io error from TTY thread: {io_error:?}\r\n");
-                }
-                Ok(AppInputEvent::DataAvailable(data)) => match data {
-                    Err(err) => print!("Got an error while reading data: {err:?}\r\n"),
-                    Ok(None) => print!("Got EOF from input\r\n"),
-                    Ok(Some(bytes)) => {
-                        match std::str::from_utf8(bytes.as_ref()) {
-                            Ok(s) => print!("Got input data: {s:?}\r\n"),
-                            Err(_) => print!("Got non-UTF8 input data: {bytes:?}\r\n"),
+                Ok(AppInputEvent::TTYError(tty_error)) => app.handle_tty_input_error(tty_error),
+                Ok(AppInputEvent::DataAvailable(data_input_event)) => match data_input_event {
+                    Ok(data) => {
+                        let borrowed_data = data.as_ref().map(Vec::as_slice);
+                        app.handle_document_data(borrowed_data);
+                        if let Some(buffer) = data {
+                            data_buffer_sender.send(buffer);
                         };
-
-                        data_buffer_sender.send(bytes);
                     }
+                    Err(data_input_error) => app.handle_data_input_error(data_input_error),
                 },
                 Err(err) => {
                     let _: std::sync::mpsc::RecvError = err;
@@ -160,6 +154,7 @@ enum AppInputEvent {
     Sigwinch,
     TTYEvent(TermionEvent),
     TTYError(io::Error),
+    // Someday: We should always return the `Vec<u8>`
     DataAvailable(io::Result<Option<Vec<u8>>>),
 }
 
@@ -202,6 +197,8 @@ fn get_tty_input(
     should_get_tty_input_mutex: Arc<Mutex<bool>>,
     should_get_tty_input_condvar: Arc<Condvar>,
 ) {
+    // Someday: Enabling bracketed-paste-mode might solve this.
+
     // Due to the implementation of termion's [events] function, which reads
     // a minimum of two bytes so that it can detect solitary ESC presses,
     // if you copy and paste text starting with ':' (or containing a ':' at
@@ -217,7 +214,6 @@ fn get_tty_input(
     // it directly, even if you're just pasting a single character. I don't know
     // how it does that! Maybe it checks how much data it read and assumes that
     // if it read more than N bytes it must be pasted data?
-
     let mut tty_events = termion::get_tty().unwrap().events();
 
     thread::spawn(move || {
@@ -260,6 +256,8 @@ fn get_document_data(
             Some(_) => filename,
         };
 
+        // Someday: This shouldn't be inside the closure; we should immediately
+        // try to open the file (and fail if it doesn't exist).
         let mut input: Box<dyn io::Read> = match filename {
             None => Box::new(std::io::stdin()),
             Some(filename) => Box::new(std::fs::File::open(filename).unwrap()),

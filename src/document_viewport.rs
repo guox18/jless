@@ -17,7 +17,8 @@ use crate::document::{CursorRange, Document};
 
 pub struct DocumentViewport<D: Document> {
     top_line: D::ScreenLine,
-    current_focus: D::Cursor,
+    // Soon: Make this private again.
+    pub current_focus: D::Cursor,
     dimensions: Dimensions,
 
     // We call this scrolloff_setting, to differentiate between
@@ -72,7 +73,7 @@ impl<D: Document> DocumentViewport<D> {
         }
     }
 
-    fn set_scrolloff(&mut self, scrolloff: usize) {
+    pub fn set_scrolloff(&mut self, scrolloff: usize) {
         self.scrolloff_setting = scrolloff;
     }
 

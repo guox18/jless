@@ -126,7 +126,8 @@ pub trait Document {
     fn move_cursor_down(&self, lines: usize, cursor: &Self::Cursor) -> Option<Self::Cursor>;
     fn move_cursor_up(&self, lines: usize, cursor: &Self::Cursor) -> Option<Self::Cursor>;
 
-    #[cfg(test)]
+    // Soon: Uncomment this.
+    // #[cfg(test)]
     fn debug_text_content(&self, screen_line: &Self::ScreenLine) -> &[u8];
 }
 

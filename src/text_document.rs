@@ -438,7 +438,8 @@ impl Document for TextDocument {
         }
     }
 
-    #[cfg(test)]
+    // Soon: Uncomment this.
+    // #[cfg(test)]
     fn debug_text_content(&self, screen_line: &Self::ScreenLine) -> &[u8] {
         self.screen_line_contents(screen_line)
     }
