@@ -1,6 +1,7 @@
 use std::cmp;
 use std::ops::RangeInclusive;
 
+use crate::action::Action;
 use crate::dimensions::Dimensions;
 use crate::document::{CursorRange, Document};
 
@@ -683,6 +684,16 @@ impl<D: Document> DocumentViewer<D> {
 
     pub fn append_document_data(&mut self, data: &[u8]) {
         self.doc.append(data);
+    }
+
+    pub fn do_action(&mut self, action: Action) {
+        match action {
+            Action::NoOp => (),
+            Action::MoveCursorDown(n) => self.move_cursor_down(n),
+            Action::MoveCursorUp(n) => self.move_cursor_up(n),
+            Action::ScrollViewportDown(n) => self.scroll_viewport_down(n),
+            Action::ScrollViewportUp(n) => self.scroll_viewport_up(n),
+        }
     }
 
     pub fn viewport_lines<'a>(&'a self) -> impl Iterator<Item = Option<D::ScreenLine>> + 'a {

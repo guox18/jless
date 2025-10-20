@@ -5,6 +5,7 @@ use rustyline::history::MemHistory;
 use rustyline::Editor;
 use termion::event::{Event as TermionEvent, Key};
 
+use crate::action::Action;
 use crate::dimensions::Dimensions;
 use crate::document::Document;
 use crate::document_viewer::DocumentViewer;
@@ -80,12 +81,16 @@ impl<D: Document> App<D> {
 
     pub fn handle_tty_event(&mut self, tty_event: TermionEvent) -> Option<Break> {
         if let Some(viewer) = &mut self.viewer {
-            match tty_event {
-                TermionEvent::Key(Key::Char('j')) => viewer.move_cursor_down(1),
-                TermionEvent::Key(Key::Char('k')) => viewer.move_cursor_up(1),
-                TermionEvent::Key(Key::Ctrl('e')) => viewer.scroll_viewport_down(1),
-                TermionEvent::Key(Key::Ctrl('y')) => viewer.scroll_viewport_up(1),
-                _ => (),
+            let action = match tty_event {
+                TermionEvent::Key(Key::Char('j')) => Some(Action::MoveCursorDown(1)),
+                TermionEvent::Key(Key::Char('k')) => Some(Action::MoveCursorUp(1)),
+                TermionEvent::Key(Key::Ctrl('e')) => Some(Action::ScrollViewportDown(1)),
+                TermionEvent::Key(Key::Ctrl('y')) => Some(Action::ScrollViewportUp(1)),
+                _ => None,
+            };
+
+            if let Some(action) = action {
+                viewer.do_action(action);
             }
         }
 

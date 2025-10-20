@@ -12,6 +12,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 
+mod action;
 mod app;
 mod dimensions;
 mod document;
