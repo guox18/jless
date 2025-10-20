@@ -2,7 +2,7 @@ use rustyline::history::MemHistory;
 use rustyline::Editor;
 use signal_hook::consts::SIGWINCH;
 use termion::cursor::HideCursor;
-use termion::event::{Event as TermionEvent, Key};
+use termion::event::Event as TermionEvent;
 use termion::input::{MouseTerminal, TermRead};
 use termion::raw::IntoRawMode;
 use termion::screen::IntoAlternateScreen;
@@ -15,7 +15,7 @@ use std::thread;
 mod app;
 mod dimensions;
 mod document;
-mod document_viewport;
+mod document_viewer;
 mod text_document;
 // Someday: This is temporary, will probably want to rewrite this.
 mod terminal;
@@ -44,7 +44,7 @@ fn main() {
             .expect("unable to switch to alternate screen");
         let stdout = HideCursor::from(stdout);
         let stdout = MouseTerminal::from(stdout);
-        let mut stdout: Box<dyn std::io::Write> = Box::new(stdout);
+        let stdout: Box<dyn std::io::Write> = Box::new(stdout);
 
         let editor_config = rustyline::config::Config::builder()
             .keyseq_timeout(Some(0))

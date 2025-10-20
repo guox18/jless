@@ -4,7 +4,7 @@ use std::ops::RangeInclusive;
 use crate::dimensions::Dimensions;
 use crate::document::{CursorRange, Document};
 
-/// The `DocumentViewport` manages what part of a document is displayed on screen
+/// The `DocumentViewer` manages what part of a document is displayed on screen
 /// as the user takes actions to move the cursor or manipulate the document. Much
 /// of the behavior here matches or is inspired by vim behavior. A type that
 /// implements `Document` is responsible for deciding the actual content that goes
@@ -15,7 +15,8 @@ use crate::document::{CursorRange, Document};
 /// scrolling actions that manipulate the viewport, the cursor should be updated
 /// to a position in the document that is within the viewport.
 
-pub struct DocumentViewport<D: Document> {
+pub struct DocumentViewer<D: Document> {
+    pub doc: D,
     top_line: D::ScreenLine,
     // Soon: Make this private again.
     pub current_focus: D::Cursor,
@@ -58,14 +59,16 @@ enum PositionOfScreenLine {
     BelowBottomLine,
 }
 
-impl<D: Document> DocumentViewport<D> {
+impl<D: Document> DocumentViewer<D> {
     pub fn new(
+        doc: D,
         first_line: D::ScreenLine,
         initial_cursor: D::Cursor,
         dimensions: Dimensions,
         scrolloff: usize,
     ) -> Self {
-        DocumentViewport {
+        DocumentViewer {
+            doc,
             top_line: first_line,
             current_focus: initial_cursor,
             dimensions,
@@ -91,14 +94,10 @@ impl<D: Document> DocumentViewport<D> {
     }
 
     // If the last line of the file appears before `screen_index`, this will return `None`.
-    fn screen_line_at_screen_index(
-        &self,
-        doc: &D,
-        mut screen_index: usize,
-    ) -> Option<D::ScreenLine> {
+    fn screen_line_at_screen_index(&self, mut screen_index: usize) -> Option<D::ScreenLine> {
         let mut curr_line = self.top_line.clone();
         while screen_index > 0 {
-            curr_line = doc.next_screen_line(&curr_line)?;
+            curr_line = self.doc.next_screen_line(&curr_line)?;
             screen_index -= 1;
         }
         Some(curr_line)
@@ -106,14 +105,10 @@ impl<D: Document> DocumentViewport<D> {
 
     // If the last line of the file appears before `screen_index`, this will return the
     // last line of the file.
-    fn last_screen_line_at_or_before_screen_index(
-        &self,
-        doc: &D,
-        mut screen_index: usize,
-    ) -> D::ScreenLine {
+    fn last_screen_line_at_or_before_screen_index(&self, mut screen_index: usize) -> D::ScreenLine {
         let mut curr_line = self.top_line.clone();
         while screen_index > 0 {
-            let Some(next_screen_line) = doc.next_screen_line(&curr_line) else {
+            let Some(next_screen_line) = self.doc.next_screen_line(&curr_line) else {
                 return curr_line;
             };
             curr_line = next_screen_line;
@@ -122,11 +117,7 @@ impl<D: Document> DocumentViewport<D> {
         curr_line
     }
 
-    fn position_of_screen_line(
-        &self,
-        doc: &D,
-        screen_line: &D::ScreenLine,
-    ) -> PositionOfScreenLine {
+    fn position_of_screen_line(&self, screen_line: &D::ScreenLine) -> PositionOfScreenLine {
         if screen_line < &self.top_line {
             return PositionOfScreenLine::AboveTopLine;
         }
@@ -139,7 +130,8 @@ impl<D: Document> DocumentViewport<D> {
             }
 
             screen_index += 1;
-            curr_screen_line = doc
+            curr_screen_line = self
+                .doc
                 .next_screen_line(&curr_screen_line)
                 .expect("[screen_line] should exist after top line and before EOF");
         }
@@ -147,19 +139,19 @@ impl<D: Document> DocumentViewport<D> {
         PositionOfScreenLine::BelowBottomLine
     }
 
-    pub fn move_cursor_down(&mut self, doc: &D, lines: usize) {
-        self.update_so_new_cursor_is_visible(doc, doc.move_cursor_down(lines, &self.current_focus));
+    pub fn move_cursor_down(&mut self, lines: usize) {
+        self.update_so_new_cursor_is_visible(self.doc.move_cursor_down(lines, &self.current_focus));
     }
 
-    pub fn move_cursor_up(&mut self, doc: &D, lines: usize) {
-        self.update_so_new_cursor_is_visible(doc, doc.move_cursor_up(lines, &self.current_focus));
+    pub fn move_cursor_up(&mut self, lines: usize) {
+        self.update_so_new_cursor_is_visible(self.doc.move_cursor_up(lines, &self.current_focus));
     }
 
-    pub fn scroll_viewport_down(&mut self, doc: &D, mut lines: usize) {
+    pub fn scroll_viewport_down(&mut self, mut lines: usize) {
         let mut lines_scrolled = 0;
         let mut next_top_line = self.top_line.clone();
         while lines > 0 {
-            match doc.next_screen_line(&next_top_line) {
+            match self.doc.next_screen_line(&next_top_line) {
                 None => break,
                 Some(line) => {
                     lines -= 1;
@@ -171,15 +163,15 @@ impl<D: Document> DocumentViewport<D> {
 
         if lines_scrolled > 0 {
             self.top_line = next_top_line;
-            self.maybe_update_focused_node_after_scroll(doc);
+            self.maybe_update_focused_node_after_scroll();
         }
     }
 
-    pub fn scroll_viewport_up(&mut self, doc: &D, mut lines: usize) {
+    pub fn scroll_viewport_up(&mut self, mut lines: usize) {
         let mut lines_scrolled = 0;
         let mut next_top_line = self.top_line.clone();
         while lines > 0 {
-            match doc.prev_screen_line(&next_top_line) {
+            match self.doc.prev_screen_line(&next_top_line) {
                 None => break,
                 Some(line) => {
                     lines -= 1;
@@ -191,11 +183,11 @@ impl<D: Document> DocumentViewport<D> {
 
         if lines_scrolled > 0 {
             self.top_line = next_top_line;
-            self.maybe_update_focused_node_after_scroll(doc);
+            self.maybe_update_focused_node_after_scroll();
         }
     }
 
-    fn update_so_new_cursor_is_visible(&mut self, doc: &D, new_cursor: Option<D::Cursor>) {
+    fn update_so_new_cursor_is_visible(&mut self, new_cursor: Option<D::Cursor>) {
         // If an operation doesn't move the cursor, it will return `None`, so there's
         // nothing to do.
         let Some(new_cursor) = new_cursor else {
@@ -204,11 +196,8 @@ impl<D: Document> DocumentViewport<D> {
 
         self.current_focus = new_cursor;
 
-        let (cursor_range, acceptable_start_index_range) = self
-            .calculate_acceptable_start_screen_indexes_to_show_cursor_node(
-                doc,
-                &self.current_focus,
-            );
+        let (cursor_range, acceptable_start_index_range) =
+            self.calculate_acceptable_start_screen_indexes_to_show_cursor_node(&self.current_focus);
 
         let AcceptableStartScreenIndexesToShowCursorNode {
             start: start_index,
@@ -216,9 +205,8 @@ impl<D: Document> DocumentViewport<D> {
             ..
         } = acceptable_start_index_range;
 
-        let screen_line_at_first_acceptable_start =
-            self.screen_line_at_screen_index(doc, start_index);
-        let screen_line_at_last_acceptable_start = self.screen_line_at_screen_index(doc, end_index);
+        let screen_line_at_first_acceptable_start = self.screen_line_at_screen_index(start_index);
+        let screen_line_at_last_acceptable_start = self.screen_line_at_screen_index(end_index);
 
         let cursor_start_is_before_first_acceptable_start =
             match screen_line_at_first_acceptable_start {
@@ -237,13 +225,13 @@ impl<D: Document> DocumentViewport<D> {
         if cursor_start_is_before_first_acceptable_start {
             // Cursor is too close to the top of the screen (or past it); move the viewport so
             // the cursor is at the start of the acceptable range.
-            self.top_line = self.n_screen_lines_before(doc, cursor_range.start, start_index);
+            self.top_line = self.n_screen_lines_before(cursor_range.start, start_index);
         } else if cursor_start_is_at_or_before_last_acceptable_start {
             // Nothing to do, the cursor is in an acceptable range!
         } else {
             // Cursor is too close to the bottom of the screen (or past it); move the viewport
             // so the cursor is at the end of the acceptable range.
-            self.top_line = self.n_screen_lines_before(doc, cursor_range.start, end_index);
+            self.top_line = self.n_screen_lines_before(cursor_range.start, end_index);
         }
     }
 
@@ -252,7 +240,6 @@ impl<D: Document> DocumentViewport<D> {
     // count `bounded_screen_lines_{before,after}_screen_line`.
     fn calculate_acceptable_start_screen_indexes_to_show_cursor_node(
         &self,
-        doc: &D,
         cursor: &D::Cursor,
     ) -> (
         CursorRange<D::ScreenLine>,
@@ -266,7 +253,9 @@ impl<D: Document> DocumentViewport<D> {
         //
         // Once we have this range, we will snap the position of the cursor into that range.
 
-        let cursor_layout_details = doc.cursor_layout_details(&cursor, self.dimensions.height - 1);
+        let cursor_layout_details = self
+            .doc
+            .cursor_layout_details(&cursor, self.dimensions.height - 1);
 
         // Initial acceptable range is the whole screen.
         let mut first_acceptable_screen_index = 0;
@@ -409,16 +398,16 @@ impl<D: Document> DocumentViewport<D> {
         (cursor_layout_details.range, acceptable_start_indexes)
     }
 
-    fn screen_indexes_within_scrolloff(&self, doc: &D) -> RangeInclusive<usize> {
+    fn screen_indexes_within_scrolloff(&self) -> RangeInclusive<usize> {
         let min_screenlines_between_edge_of_screen_and_cursor = self.effective_scrolloff();
 
         // If the top of the screen is the top of the document, we don't enforce scrolloff.
-        let first_acceptable_screen_index = if doc.is_first_screen_line_of_document(&self.top_line)
-        {
-            0
-        } else {
-            min_screenlines_between_edge_of_screen_and_cursor
-        };
+        let first_acceptable_screen_index =
+            if self.doc.is_first_screen_line_of_document(&self.top_line) {
+                0
+            } else {
+                min_screenlines_between_edge_of_screen_and_cursor
+            };
 
         let last_screen_index = self.dimensions.height - 1;
         let last_acceptable_screen_index =
@@ -427,10 +416,10 @@ impl<D: Document> DocumentViewport<D> {
         first_acceptable_screen_index..=last_acceptable_screen_index
     }
 
-    fn maybe_update_focused_node_after_scroll(&mut self, doc: &D) {
+    fn maybe_update_focused_node_after_scroll(&mut self) {
         // When scrolling, we'll allow scrolling wrapped lines partly off the screen as long
         // as any part of the focused node still obeys the scrolloff setting.
-        let acceptable_screen_indexes = self.screen_indexes_within_scrolloff(doc);
+        let acceptable_screen_indexes = self.screen_indexes_within_scrolloff();
 
         // Using `last_screen_line_at_or_before_screen_index` handles the case when the end
         // of the file is on screen. In the extreme example, consider if the last line of the
@@ -439,38 +428,40 @@ impl<D: Document> DocumentViewport<D> {
         // and last acceptable screen line will both be the current top line, which is the last
         // line of the document.
 
-        let first_acceptable_screen_line = self
-            .last_screen_line_at_or_before_screen_index(doc, *acceptable_screen_indexes.start());
+        let first_acceptable_screen_line =
+            self.last_screen_line_at_or_before_screen_index(*acceptable_screen_indexes.start());
         let last_acceptable_screen_line =
-            self.last_screen_line_at_or_before_screen_index(doc, *acceptable_screen_indexes.end());
+            self.last_screen_line_at_or_before_screen_index(*acceptable_screen_indexes.end());
 
-        let focused_range = doc.cursor_range(&self.current_focus);
+        let focused_range = self.doc.cursor_range(&self.current_focus);
 
         if focused_range.end < first_acceptable_screen_line {
-            self.current_focus = doc
+            self.current_focus = self
+                .doc
                 .convert_screen_line_to_cursor(first_acceptable_screen_line, &self.current_focus);
         } else if last_acceptable_screen_line < focused_range.start {
-            self.current_focus =
-                doc.convert_screen_line_to_cursor(last_acceptable_screen_line, &self.current_focus);
+            self.current_focus = self
+                .doc
+                .convert_screen_line_to_cursor(last_acceptable_screen_line, &self.current_focus);
         } else {
             // Current focused range overlaps with acceptable screen line ranges;
             // nothing to do!
         }
     }
 
-    pub fn resize(&mut self, doc: &mut D, new_dimensions: Dimensions) {
+    pub fn resize(&mut self, new_dimensions: Dimensions) {
         // Handle resizes in two parts: first resize the width, then the height.
-        self.resize_width(doc, new_dimensions.width);
-        self.resize_height(doc, new_dimensions.height);
-        self.move_current_focus_within_scrolloff_after_resize(doc);
+        self.resize_width(new_dimensions.width);
+        self.resize_height(new_dimensions.height);
+        self.move_current_focus_within_scrolloff_after_resize();
     }
 
-    fn update_dimensions_and_resize_doc(&mut self, doc: &mut D, dimensions: Dimensions) {
-        doc.resize(dimensions.width);
+    fn update_dimensions_and_resize_doc(&mut self, dimensions: Dimensions) {
         self.dimensions = dimensions;
+        self.doc.resize(dimensions.width);
     }
 
-    fn resize_width(&mut self, doc: &mut D, new_width: usize) {
+    fn resize_width(&mut self, new_width: usize) {
         if new_width == self.dimensions.width {
             return;
         }
@@ -480,9 +471,9 @@ impl<D: Document> DocumentViewport<D> {
             ..self.dimensions
         };
 
-        let old_cursor_range = doc.cursor_range(&self.current_focus);
-        let start_position = self.position_of_screen_line(doc, &old_cursor_range.start);
-        let end_position = self.position_of_screen_line(doc, &old_cursor_range.end);
+        let old_cursor_range = self.doc.cursor_range(&self.current_focus);
+        let start_position = self.position_of_screen_line(&old_cursor_range.start);
+        let end_position = self.position_of_screen_line(&old_cursor_range.end);
 
         match (start_position, end_position) {
             (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::AboveTopLine) => {
@@ -491,29 +482,28 @@ impl<D: Document> DocumentViewport<D> {
             (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::AtScreenIndex(index)) => {
                 // Don't top line to keep anchored, so we'll keep the end of the line
                 // in the same place.
-                self.update_dimensions_and_resize_doc(doc, new_dimensions);
-                let new_cursor_range = doc.cursor_range(&self.current_focus);
+                self.update_dimensions_and_resize_doc(new_dimensions);
+                let new_cursor_range = self.doc.cursor_range(&self.current_focus);
                 self.top_line =
-                    self.n_screen_lines_before_or_top_of_doc(doc, new_cursor_range.end, index);
+                    self.n_screen_lines_before_or_top_of_doc(new_cursor_range.end, index);
             }
             (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::BelowBottomLine) => {
-                let lines_above_top_of_screen =
-                    doc.diff_screen_lines(&self.top_line, &old_cursor_range.start);
-                let lines_below_bottom_of_screen = doc
+                let lines_above_top_of_screen = self
+                    .doc
+                    .diff_screen_lines(&self.top_line, &old_cursor_range.start);
+                let lines_below_bottom_of_screen = self
+                    .doc
                     .diff_screen_lines(&old_cursor_range.end, &self.top_line)
                     - self.dimensions.height;
 
-                self.update_dimensions_and_resize_doc(doc, new_dimensions);
-                let new_cursor_range = doc.cursor_range(&self.current_focus);
+                self.update_dimensions_and_resize_doc(new_dimensions);
+                let new_cursor_range = self.doc.cursor_range(&self.current_focus);
 
                 if old_cursor_range.num_screen_lines == new_cursor_range.num_screen_lines {
                     // If the cursor is the same number of lines long, then we'll keep the lines in
                     // the same spot.
-                    self.top_line = self.n_screen_lines_after(
-                        doc,
-                        new_cursor_range.start,
-                        lines_above_top_of_screen,
-                    );
+                    self.top_line = self
+                        .n_screen_lines_after(new_cursor_range.start, lines_above_top_of_screen);
                 } else {
                     // If the size of the cursor changed, we'll try to keep the content
                     // near the center of the screen in approximately the same place.
@@ -534,22 +524,20 @@ impl<D: Document> DocumentViewport<D> {
                             as usize;
 
                     let screen_line_in_middle_of_screen = self.n_screen_lines_after(
-                        doc,
                         new_cursor_range.start,
                         new_cursor_index_in_middle_of_screen,
                     );
                     self.top_line = self.n_screen_lines_before_or_top_of_doc(
-                        doc,
                         screen_line_in_middle_of_screen,
                         self.dimensions.height / 2,
                     );
                 }
             }
             (PositionOfScreenLine::AtScreenIndex(index), _) => {
-                self.update_dimensions_and_resize_doc(doc, new_dimensions);
-                let new_cursor_range = doc.cursor_range(&self.current_focus);
+                self.update_dimensions_and_resize_doc(new_dimensions);
+                let new_cursor_range = self.doc.cursor_range(&self.current_focus);
                 self.top_line =
-                    self.n_screen_lines_before_or_top_of_doc(doc, new_cursor_range.start, index);
+                    self.n_screen_lines_before_or_top_of_doc(new_cursor_range.start, index);
             }
             (PositionOfScreenLine::BelowBottomLine, _) => {
                 panic!("entirety of focused node is past the end of the screen");
@@ -557,7 +545,7 @@ impl<D: Document> DocumentViewport<D> {
         }
     }
 
-    fn resize_height(&mut self, doc: &mut D, new_height: usize) {
+    fn resize_height(&mut self, new_height: usize) {
         let old_height = self.dimensions.height;
         if new_height == old_height {
             return;
@@ -576,9 +564,9 @@ impl<D: Document> DocumentViewport<D> {
             (percentile * ((new_height - 1) as f64)).round() as usize
         };
 
-        let cursor_range = doc.cursor_range(&self.current_focus);
-        let start_position = self.position_of_screen_line(doc, &cursor_range.start);
-        let end_position = self.position_of_screen_line(doc, &cursor_range.end);
+        let cursor_range = self.doc.cursor_range(&self.current_focus);
+        let start_position = self.position_of_screen_line(&cursor_range.start);
+        let end_position = self.position_of_screen_line(&cursor_range.end);
 
         match (start_position, end_position) {
             (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::AboveTopLine) => {
@@ -592,9 +580,7 @@ impl<D: Document> DocumentViewport<D> {
             (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::BelowBottomLine) => {
                 // Keep middle of what's visible on screen in the middle.
                 let half_old_height = self.dimensions.height / 2;
-                anchor_screen_line = self
-                    .screen_line_at_screen_index(doc, half_old_height)
-                    .unwrap();
+                anchor_screen_line = self.screen_line_at_screen_index(half_old_height).unwrap();
                 new_index = new_height / 2;
             }
             (PositionOfScreenLine::AtScreenIndex(index), PositionOfScreenLine::AboveTopLine) => {
@@ -606,7 +592,7 @@ impl<D: Document> DocumentViewport<D> {
             ) => {
                 // Keep the middle of focused node in the same percentile.
                 let middle_index = (start_index + end_index) / 2;
-                anchor_screen_line = self.screen_line_at_screen_index(doc, middle_index).unwrap();
+                anchor_screen_line = self.screen_line_at_screen_index(middle_index).unwrap();
                 new_index = convert_old_index_to_new_index(middle_index);
             }
             (PositionOfScreenLine::AtScreenIndex(index), PositionOfScreenLine::BelowBottomLine) => {
@@ -619,8 +605,7 @@ impl<D: Document> DocumentViewport<D> {
             }
         }
 
-        self.top_line =
-            self.n_screen_lines_before_or_top_of_doc(doc, anchor_screen_line, new_index);
+        self.top_line = self.n_screen_lines_before_or_top_of_doc(anchor_screen_line, new_index);
 
         self.dimensions = Dimensions {
             height: new_height,
@@ -628,37 +613,31 @@ impl<D: Document> DocumentViewport<D> {
         };
     }
 
-    fn move_current_focus_within_scrolloff_after_resize(&mut self, doc: &D) {
+    fn move_current_focus_within_scrolloff_after_resize(&mut self) {
         // After a resize, we'll allow part of the focused node to be outside of scrolloff,
         // but if that's not the case we'll move the screen slightly to make it so.
-        let acceptable_screen_indexes = self.screen_indexes_within_scrolloff(doc);
+        let acceptable_screen_indexes = self.screen_indexes_within_scrolloff();
 
         // We use `last_screen_line_at_or_before_screen_index` in `maybe_update_focused_node_after_scroll`
         // to allow scrolling the end of the file to the very top of the screen. We'll use the same
         // relaxation here, so that if you do that, and the resize the screen, the cursor won't
         // "jump" into the scrolloff zone.
 
-        let first_acceptable_screen_line = self
-            .last_screen_line_at_or_before_screen_index(doc, *acceptable_screen_indexes.start());
+        let first_acceptable_screen_line =
+            self.last_screen_line_at_or_before_screen_index(*acceptable_screen_indexes.start());
         let last_acceptable_screen_line =
-            self.last_screen_line_at_or_before_screen_index(doc, *acceptable_screen_indexes.end());
+            self.last_screen_line_at_or_before_screen_index(*acceptable_screen_indexes.end());
 
-        let focused_range = doc.cursor_range(&self.current_focus);
+        let focused_range = self.doc.cursor_range(&self.current_focus);
 
         if focused_range.end < first_acceptable_screen_line {
             // Put the end of the focused range at the first acceptable screen index.
-            self.top_line = self.n_screen_lines_before(
-                doc,
-                focused_range.end,
-                *acceptable_screen_indexes.start(),
-            );
+            self.top_line =
+                self.n_screen_lines_before(focused_range.end, *acceptable_screen_indexes.start());
         } else if last_acceptable_screen_line < focused_range.start {
             // Put the start of the focused range at the last acceptable screen index.
-            self.top_line = self.n_screen_lines_before(
-                doc,
-                focused_range.start,
-                *acceptable_screen_indexes.end(),
-            );
+            self.top_line =
+                self.n_screen_lines_before(focused_range.start, *acceptable_screen_indexes.end());
         } else {
             // Current focused range overlaps with acceptable screen line ranges;
             // nothing to do!
@@ -666,14 +645,9 @@ impl<D: Document> DocumentViewport<D> {
     }
 
     // Assumes that this will always exist.
-    fn n_screen_lines_before(
-        &self,
-        doc: &D,
-        mut screen_line: D::ScreenLine,
-        mut n: usize,
-    ) -> D::ScreenLine {
+    fn n_screen_lines_before(&self, mut screen_line: D::ScreenLine, mut n: usize) -> D::ScreenLine {
         while n > 0 {
-            screen_line = doc.prev_screen_line(&screen_line).unwrap();
+            screen_line = self.doc.prev_screen_line(&screen_line).unwrap();
             n -= 1;
         }
         screen_line
@@ -681,12 +655,11 @@ impl<D: Document> DocumentViewport<D> {
 
     fn n_screen_lines_before_or_top_of_doc(
         &self,
-        doc: &D,
         mut screen_line: D::ScreenLine,
         mut n: usize,
     ) -> D::ScreenLine {
         while n > 0 {
-            let Some(prev_screen_line) = doc.prev_screen_line(&screen_line) else {
+            let Some(prev_screen_line) = self.doc.prev_screen_line(&screen_line) else {
                 return screen_line;
             };
             screen_line = prev_screen_line;
@@ -696,25 +669,25 @@ impl<D: Document> DocumentViewport<D> {
     }
 
     // Assumes that this will always exist
-    fn n_screen_lines_after(
-        &self,
-        doc: &D,
-        mut screen_line: D::ScreenLine,
-        mut n: usize,
-    ) -> D::ScreenLine {
+    fn n_screen_lines_after(&self, mut screen_line: D::ScreenLine, mut n: usize) -> D::ScreenLine {
         while n > 0 {
-            screen_line = doc.next_screen_line(&screen_line).unwrap();
+            screen_line = self.doc.next_screen_line(&screen_line).unwrap();
             n -= 1;
         }
         screen_line
     }
 
-    pub fn viewport_lines<'a, 'b>(
-        &'a self,
-        document: &'b D,
-    ) -> impl Iterator<Item = Option<D::ScreenLine>> + 'b {
+    pub fn document_eof(&mut self) {
+        self.doc.eof();
+    }
+
+    pub fn append_document_data(&mut self, data: &[u8]) {
+        self.doc.append(data);
+    }
+
+    pub fn viewport_lines<'a>(&'a self) -> impl Iterator<Item = Option<D::ScreenLine>> + 'a {
         ViewportLinesIterator {
-            document,
+            document: &self.doc,
             next_line: Some(self.top_line.clone()),
             remaining_height: self.dimensions.height,
         }
@@ -763,36 +736,35 @@ mod test {
         width: usize,
         height: usize,
         scrolloff: usize,
-    ) -> (TextDocument, DocumentViewport<TextDocument>) {
+    ) -> DocumentViewer<TextDocument> {
         let mut doc = TextDocument::new(width);
         doc.append(contents);
         doc.eof();
 
         let (top_line, initial_cursor) = doc.top_screen_line_and_cursor().unwrap();
         let dimensions = Dimensions { width, height };
-        let viewport = DocumentViewport::new(top_line, initial_cursor, dimensions, scrolloff);
-
-        (doc, viewport)
+        DocumentViewer::new(doc, top_line, initial_cursor, dimensions, scrolloff)
     }
 
-    impl<D: Document> DocumentViewport<D> {
-        fn render(&self, doc: &D) -> String {
+    impl<D: Document> DocumentViewer<D> {
+        fn render(&self) -> String {
             // |12345678       9|
             // | ##|##| <width> |
             let content_width = self.dimensions.width;
             let mut s = String::new();
             writeln!(s, "┌SI┬─L#┬─{:─<content_width$}─┐", "").unwrap();
-            for (screen_index, screen_line) in self.viewport_lines(doc).enumerate() {
+            for (screen_index, screen_line) in self.viewport_lines().enumerate() {
                 let Some(screen_line) = screen_line else {
                     writeln!(s, "│{:>2}│ ~ │ {: <content_width$} │", screen_index, "").unwrap();
                     continue;
                 };
 
-                let is_focused =
-                    doc.does_screen_line_intersect_cursor(&screen_line, &self.current_focus);
-                let line_number = doc.line_number(&screen_line);
-                let wraps_from_prev_line = doc.is_after_start_of_wrapped_line(&screen_line);
-                let wraps_onto_next_line = doc.is_before_end_of_wrapped_line(&screen_line);
+                let is_focused = self
+                    .doc
+                    .does_screen_line_intersect_cursor(&screen_line, &self.current_focus);
+                let line_number = self.doc.line_number(&screen_line);
+                let wraps_from_prev_line = self.doc.is_after_start_of_wrapped_line(&screen_line);
+                let wraps_onto_next_line = self.doc.is_before_end_of_wrapped_line(&screen_line);
 
                 writeln!(
                     s,
@@ -801,7 +773,7 @@ mod test {
                     if is_focused { '*' } else { ' ' },
                     line_number,
                     if wraps_from_prev_line { '↪' } else { ' ' },
-                    doc.debug_text_content(&screen_line).as_bstr(),
+                    self.doc.debug_text_content(&screen_line).as_bstr(),
                     if wraps_onto_next_line { '↩' } else { ' ' },
                 )
                 .unwrap();
@@ -813,8 +785,8 @@ mod test {
 
     #[test]
     fn test_render() {
-        let (doc, viewport) = init(b"aaa\nbb\ncccc\ndddddd\ne\n", 4, 7, 0);
-        assert_snapshot!(viewport.render(&doc), @r"
+        let viewer = init(b"aaa\nbb\ncccc\ndddddd\ne\n", 4, 7, 0);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│*1 │ aaa  │
         │ 1│ 2 │ bb   │
@@ -828,19 +800,18 @@ mod test {
     }
 
     fn acceptable_screen_indexes(
-        doc: &TextDocument,
-        viewport: &DocumentViewport<TextDocument>,
+        viewer: &DocumentViewer<TextDocument>,
         cursor: &Cursor,
     ) -> AcceptableStartScreenIndexesToShowCursorNode {
-        viewport
-            .calculate_acceptable_start_screen_indexes_to_show_cursor_node(doc, cursor)
+        viewer
+            .calculate_acceptable_start_screen_indexes_to_show_cursor_node(cursor)
             .1
     }
 
     #[test]
     fn test_acceptable_start_screen_indexes() {
-        let (doc, mut viewport) = init(b"a\nbbbb\nc\nd\ne\nf\ng\n", 1, 10, 0);
-        assert_snapshot!(viewport.render(&doc), @r"
+        let mut viewer = init(b"a\nbbbb\nc\nd\ne\nf\ng\n", 1, 10, 0);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬───┐
         │ 0│*1 │ a │
         │ 1│ 2 │ b↩│
@@ -855,8 +826,8 @@ mod test {
         └──┴───┴───┘
         ");
 
-        let line_2 = doc.cursor_to_line_n(2);
-        assert_debug_snapshot!(acceptable_screen_indexes(&doc, &viewport, &line_2), @r"
+        let line_2 = viewer.doc.cursor_to_line_n(2);
+        assert_debug_snapshot!(acceptable_screen_indexes(&viewer, &line_2), @r"
         AcceptableStartScreenIndexesToShowCursorNode {
             cursor_height: 4,
             last_screen_index: 9,
@@ -868,8 +839,8 @@ mod test {
         }
         ");
 
-        viewport.set_scrolloff(3);
-        assert_debug_snapshot!(acceptable_screen_indexes(&doc, &viewport, &line_2), @r"
+        viewer.set_scrolloff(3);
+        assert_debug_snapshot!(acceptable_screen_indexes(&viewer, &line_2), @r"
         AcceptableStartScreenIndexesToShowCursorNode {
             cursor_height: 4,
             last_screen_index: 9,
@@ -882,8 +853,8 @@ mod test {
         ");
 
         // Example from the comment in `calculate_acceptable_start_screen_indexes_to_show_cursor_node`:
-        let (doc, viewport) = init(b"a\nbbbbbbbb\nc\nd\ne\nf\n", 1, 10, 4);
-        assert_snapshot!(viewport.render(&doc), @r"
+        let viewer = init(b"a\nbbbbbbbb\nc\nd\ne\nf\n", 1, 10, 4);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬───┐
         │ 0│*1 │ a │
         │ 1│ 2 │ b↩│
@@ -898,8 +869,8 @@ mod test {
         └──┴───┴───┘
         ");
 
-        let line_2 = doc.cursor_to_line_n(2);
-        assert_debug_snapshot!(acceptable_screen_indexes(&doc, &viewport, &line_2), @r"
+        let line_2 = viewer.doc.cursor_to_line_n(2);
+        assert_debug_snapshot!(acceptable_screen_indexes(&viewer, &line_2), @r"
         AcceptableStartScreenIndexesToShowCursorNode {
             cursor_height: 8,
             last_screen_index: 9,
@@ -918,8 +889,8 @@ mod test {
         allow_duplicates! {
             // Odd and even heights of the focused node
             for (input, height) in [("a\nb\nc\nddd\nc\nd\ne", 3), ("a\nb\nc\ndddd\nc\nd\ne", 4)].iter() {
-                let (doc, viewport) = init(input.as_bytes(), 1, 3, 0);
-                assert_snapshot!(viewport.render(&doc), @r"
+                let viewer = init(input.as_bytes(), 1, 3, 0);
+                assert_snapshot!(viewer.render(), @r"
                 ┌SI┬─L#┬───┐
                 │ 0│*1 │ a │
                 │ 1│ 2 │ b │
@@ -927,8 +898,8 @@ mod test {
                 └──┴───┴───┘
                 ");
 
-                let line_4 = doc.cursor_to_line_n(4);
-                let mut acceptable_screen_indexes = acceptable_screen_indexes(&doc, &viewport, &line_4);
+                let line_4 = viewer.doc.cursor_to_line_n(4);
+                let mut acceptable_screen_indexes = acceptable_screen_indexes(&viewer, &line_4);
                 assert_eq!(acceptable_screen_indexes.cursor_height, *height);
                 // Clear for the snapshot, since it differs
                 acceptable_screen_indexes.cursor_height = 0;
@@ -950,8 +921,8 @@ mod test {
         allow_duplicates! {
             // Odd and even heights of the focused node
             for (input, height) in [("a\nb\nc\nddddd\nc\nd\ne", 5), ("a\nb\nc\ndddd\nc\nd\ne", 4)].iter() {
-                let (doc, viewport) = init(input.as_bytes(), 1, 4, 0);
-                assert_snapshot!(viewport.render(&doc), @r"
+                let viewer = init(input.as_bytes(), 1, 4, 0);
+                assert_snapshot!(viewer.render(), @r"
                 ┌SI┬─L#┬───┐
                 │ 0│*1 │ a │
                 │ 1│ 2 │ b │
@@ -960,8 +931,8 @@ mod test {
                 └──┴───┴───┘
                 ");
 
-                let line_4 = doc.cursor_to_line_n(4);
-                let mut acceptable_screen_indexes = acceptable_screen_indexes(&doc, &viewport, &line_4);
+                let line_4 = viewer.doc.cursor_to_line_n(4);
+                let mut acceptable_screen_indexes = acceptable_screen_indexes(&viewer, &line_4);
                 assert_eq!(acceptable_screen_indexes.cursor_height, *height);
                 // Clear for the snapshot, since it differs
                 acceptable_screen_indexes.cursor_height = 0;
@@ -982,8 +953,8 @@ mod test {
 
     #[test]
     fn test_move_cursor_up_and_down() {
-        let (doc, mut viewport) = init(b"aaa\nbb\ncccc\ndddddd\ne\n", 4, 7, 0);
-        assert_snapshot!(viewport.render(&doc), @r"
+        let mut viewer = init(b"aaa\nbb\ncccc\ndddddd\ne\n", 4, 7, 0);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│*1 │ aaa  │
         │ 1│ 2 │ bb   │
@@ -995,8 +966,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.move_cursor_down(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.move_cursor_down(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 1 │ aaa  │
         │ 1│*2 │ bb   │
@@ -1008,8 +979,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.move_cursor_down(&doc, 3);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.move_cursor_down(3);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 1 │ aaa  │
         │ 1│ 2 │ bb   │
@@ -1021,8 +992,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.move_cursor_up(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.move_cursor_up(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 1 │ aaa  │
         │ 1│ 2 │ bb   │
@@ -1034,8 +1005,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.move_cursor_up(&doc, 10);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.move_cursor_up(10);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│*1 │ aaa  │
         │ 1│ 2 │ bb   │
@@ -1050,13 +1021,13 @@ mod test {
 
     #[test]
     fn test_move_cursor_up_and_down_and_move_viewport() {
-        let (doc, mut viewport) = init(
+        let mut viewer = init(
             b"aaa\nbb\ncccc\ndddddd\neeeeeee\nff\nggggg\nhh\ni\n",
             4,
             5,
             1,
         );
-        assert_snapshot!(viewport.render(&doc), @r"
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│*1 │ aaa  │
         │ 1│ 2 │ bb   │
@@ -1066,8 +1037,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.move_cursor_down(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.move_cursor_down(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 1 │ aaa  │
         │ 1│*2 │ bb   │
@@ -1077,8 +1048,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.move_cursor_down(&doc, 2);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.move_cursor_down(2);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 2 │ bb   │
         │ 1│ 3 │ cccc │
@@ -1088,8 +1059,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.move_cursor_down(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.move_cursor_down(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 4 │ dddd↩│
         │ 1│ 4 │↪dd   │
@@ -1099,8 +1070,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.move_cursor_up(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.move_cursor_up(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 3 │ cccc │
         │ 1│*4 │ dddd↩│
@@ -1110,8 +1081,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.move_cursor_down(&doc, 100);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.move_cursor_down(100);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 6 │ ff   │
         │ 1│ 7 │ gggg↩│
@@ -1124,13 +1095,13 @@ mod test {
 
     #[test]
     fn test_scroll_up_and_down() {
-        let (doc, mut viewport) = init(
+        let mut viewer = init(
             b"aaa\nbb\ncccc\ndddddd\neeeeeee\nff\nggggg\nhh\ni\n",
             4,
             5,
             1,
         );
-        assert_snapshot!(viewport.render(&doc), @r"
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│*1 │ aaa  │
         │ 1│ 2 │ bb   │
@@ -1140,8 +1111,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.scroll_viewport_down(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_down(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 2 │ bb   │
         │ 1│*3 │ cccc │
@@ -1151,8 +1122,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.scroll_viewport_down(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_down(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 3 │ cccc │
         │ 1│*4 │ dddd↩│
@@ -1162,8 +1133,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.scroll_viewport_down(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_down(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│*4 │ dddd↩│
         │ 1│*4 │↪dd   │
@@ -1173,8 +1144,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.scroll_viewport_down(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_down(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 4 │↪dd   │
         │ 1│*5 │ eeee↩│
@@ -1184,8 +1155,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.scroll_viewport_down(&doc, 10);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_down(10);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│*9 │ i    │
         │ 1│ ~ │      │
@@ -1195,8 +1166,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.scroll_viewport_up(&doc, 4);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_up(4);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 6 │ ff   │
         │ 1│ 7 │ gggg↩│
@@ -1206,8 +1177,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.scroll_viewport_up(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_up(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 5 │↪eee  │
         │ 1│ 6 │ ff   │
@@ -1217,8 +1188,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.scroll_viewport_up(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_up(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 5 │ eeee↩│
         │ 1│ 5 │↪eee  │
@@ -1228,8 +1199,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.scroll_viewport_up(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_up(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 4 │↪dd   │
         │ 1│ 5 │ eeee↩│
@@ -1239,8 +1210,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.scroll_viewport_up(&doc, 10);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_up(10);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│ 1 │ aaa  │
         │ 1│ 2 │ bb   │
@@ -1253,8 +1224,8 @@ mod test {
 
     #[test]
     fn test_scrolling_with_very_long_line() {
-        let (doc, mut viewport) = init(b"a\nb\nc1c2c3c4c5c6c7c8\nd\ne\n", 2, 4, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        let mut viewer = init(b"a\nb\nc1c2c3c4c5c6c7c8\nd\ne\n", 2, 4, 1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬────┐
         │ 0│*1 │ a  │
         │ 1│ 2 │ b  │
@@ -1263,8 +1234,8 @@ mod test {
         └──┴───┴────┘
         ");
 
-        viewport.scroll_viewport_down(&doc, 2);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_down(2);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬────┐
         │ 0│*3 │ c1↩│
         │ 1│*3 │↪c2↩│
@@ -1273,8 +1244,8 @@ mod test {
         └──┴───┴────┘
         ");
 
-        viewport.scroll_viewport_down(&doc, 4);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_down(4);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬────┐
         │ 0│*3 │↪c5↩│
         │ 1│*3 │↪c6↩│
@@ -1283,8 +1254,8 @@ mod test {
         └──┴───┴────┘
         ");
 
-        viewport.scroll_viewport_down(&doc, 2);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_down(2);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬────┐
         │ 0│*3 │↪c7↩│
         │ 1│*3 │↪c8 │
@@ -1293,8 +1264,8 @@ mod test {
         └──┴───┴────┘
         ");
 
-        viewport.scroll_viewport_down(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_down(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬────┐
         │ 0│ 3 │↪c8 │
         │ 1│*4 │ d  │
@@ -1303,8 +1274,8 @@ mod test {
         └──┴───┴────┘
         ");
 
-        viewport.scroll_viewport_up(&doc, 2);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_up(2);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬────┐
         │ 0│*3 │↪c6↩│
         │ 1│*3 │↪c7↩│
@@ -1313,8 +1284,8 @@ mod test {
         └──┴───┴────┘
         ");
 
-        viewport.scroll_viewport_up(&doc, 7);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_up(7);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬────┐
         │ 0│ 1 │ a  │
         │ 1│ 2 │ b  │
@@ -1335,9 +1306,9 @@ mod test {
             g\n\
             h\n\
             i\n";
-        let (mut doc, mut viewport) = init(text, 5, 5, 0);
-        viewport.move_cursor_down(&doc, 4);
-        assert_snapshot!(viewport.render(&doc), @r"
+        let mut viewer = init(text, 5, 5, 0);
+        viewer.move_cursor_down(4);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬───────┐
         │ 0│*5 │ 1eeee↩│
         │ 1│*5 │↪2eeee↩│
@@ -1346,8 +1317,8 @@ mod test {
         │ 4│*5 │↪5eeee↩│
         └──┴───┴───────┘
         ");
-        viewport.scroll_viewport_down(&doc, 6);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_down(6);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬───────┐
         │ 0│*5 │↪7eeee↩│
         │ 1│*5 │↪8eeee↩│
@@ -1358,8 +1329,8 @@ mod test {
         ");
 
         // start AboveTopLine, end AtScreenIndex case, keep end of cursor in same spot
-        viewport.resize_width(&mut doc, 25);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.resize_width(25);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬───────────────────────────┐
         │ 0│ 3 │ c                         │
         │ 1│ 4 │ d                         │
@@ -1370,8 +1341,8 @@ mod test {
         ");
 
         // start AtScreenIndex case, keep start of cursor in same spot
-        viewport.resize_width(&mut doc, 5);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.resize_width(5);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬───────┐
         │ 0│ 3 │ c     │
         │ 1│ 4 │ d     │
@@ -1381,8 +1352,8 @@ mod test {
         └──┴───┴───────┘
         ");
 
-        viewport.scroll_viewport_down(&doc, 3);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.scroll_viewport_down(3);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬───────┐
         │ 0│*5 │↪2eeee↩│
         │ 1│*5 │↪3eeee↩│
@@ -1396,8 +1367,8 @@ mod test {
         // percentile. If we make the screen 2 chars wide, we should see that in the middle of the
         // screen.
 
-        viewport.resize_width(&mut doc, 2);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.resize_width(2);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬────┐
         │ 0│*5 │↪ee↩│
         │ 1│*5 │↪e4↩│
@@ -1407,8 +1378,8 @@ mod test {
         └──┴───┴────┘
         ");
 
-        viewport.resize_width(&mut doc, 3);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.resize_width(3);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬─────┐
         │ 0│*5 │↪e3e↩│
         │ 1│*5 │↪eee↩│
@@ -1418,8 +1389,8 @@ mod test {
         └──┴───┴─────┘
         ");
 
-        viewport.resize_width(&mut doc, 4);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.resize_width(4);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬──────┐
         │ 0│*5 │↪ee3e↩│
         │ 1│*5 │↪eee4↩│
@@ -1429,8 +1400,8 @@ mod test {
         └──┴───┴──────┘
         ");
 
-        viewport.resize_width(&mut doc, 5);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.resize_width(5);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬───────┐
         │ 0│*5 │↪2eeee↩│
         │ 1│*5 │↪3eeee↩│
@@ -1441,8 +1412,8 @@ mod test {
         ");
 
         // Guess there's a slight off-by-one here, but seems fine.
-        viewport.resize_width(&mut doc, 6);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.resize_width(6);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬────────┐
         │ 0│*5 │↪eeee3e↩│
         │ 1│*5 │↪eee4e!↩│
@@ -1464,10 +1435,10 @@ mod test {
             g\n\
             h\n\
             i\n";
-        let (mut doc, mut viewport) = init(text, 3, 5, 0);
-        viewport.move_cursor_down(&doc, 4);
-        viewport.scroll_viewport_up(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        let mut viewer = init(text, 3, 5, 0);
+        viewer.move_cursor_down(4);
+        viewer.scroll_viewport_up(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬─────┐
         │ 0│ 4 │ d   │
         │ 1│*5 │ 1ee↩│
@@ -1477,8 +1448,8 @@ mod test {
         └──┴───┴─────┘
         ");
 
-        viewport.resize_height(&mut doc, 10);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.resize_height(10);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬─────┐
         │ 0│ 3 │ c   │
         │ 1│ 4 │ d   │
@@ -1493,10 +1464,10 @@ mod test {
         └──┴───┴─────┘
         ");
 
-        let (mut doc, mut viewport) = init(text, 3, 5, 0);
-        viewport.move_cursor_down(&doc, 4);
-        viewport.scroll_viewport_down(&doc, 8);
-        assert_snapshot!(viewport.render(&doc), @r"
+        let mut viewer = init(text, 3, 5, 0);
+        viewer.move_cursor_down(4);
+        viewer.scroll_viewport_down(8);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬─────┐
         │ 0│*5 │↪9ee↩│
         │ 1│*5 │↪0ee │
@@ -1506,8 +1477,8 @@ mod test {
         └──┴───┴─────┘
         ");
 
-        viewport.resize_height(&mut doc, 10);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.resize_height(10);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬─────┐
         │ 0│*5 │↪8ee↩│
         │ 1│*5 │↪9ee↩│
@@ -1522,10 +1493,10 @@ mod test {
         └──┴───┴─────┘
         ");
 
-        let (mut doc, mut viewport) = init(text, 3, 5, 0);
-        viewport.move_cursor_down(&doc, 4);
-        viewport.scroll_viewport_down(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        let mut viewer = init(text, 3, 5, 0);
+        viewer.move_cursor_down(4);
+        viewer.scroll_viewport_down(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬─────┐
         │ 0│*5 │↪2ee↩│
         │ 1│*5 │↪3ee↩│
@@ -1534,8 +1505,8 @@ mod test {
         │ 4│*5 │↪6ee↩│
         └──┴───┴─────┘
         ");
-        viewport.resize_height(&mut doc, 3);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.resize_height(3);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬─────┐
         │ 0│*5 │↪3ee↩│
         │ 1│*5 │↪4ee↩│
@@ -1543,10 +1514,10 @@ mod test {
         └──┴───┴─────┘
         ");
 
-        let (mut doc, mut viewport) = init(text, 10, 5, 0);
-        viewport.move_cursor_down(&doc, 4);
-        viewport.scroll_viewport_down(&doc, 1);
-        assert_snapshot!(viewport.render(&doc), @r"
+        let mut viewer = init(text, 10, 5, 0);
+        viewer.move_cursor_down(4);
+        viewer.scroll_viewport_down(1);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬────────────┐
         │ 0│ 4 │ d          │
         │ 1│*5 │ 1ee2ee3ee4↩│
@@ -1555,8 +1526,8 @@ mod test {
         │ 4│ 6 │ f          │
         └──┴───┴────────────┘
         ");
-        viewport.resize_height(&mut doc, 7);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.resize_height(7);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬────────────┐
         │ 0│ 3 │ c          │
         │ 1│ 4 │ d          │
@@ -1574,9 +1545,9 @@ mod test {
         let text = b"\
             01\n02\n03\n04\n55\n06\n07\n08\n09\n10\n\
             11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n";
-        let (mut doc, mut viewport) = init(text, 3, 15, 0);
-        viewport.move_cursor_down(&doc, 13);
-        assert_snapshot!(viewport.render(&doc), @r"
+        let mut viewer = init(text, 3, 15, 0);
+        viewer.move_cursor_down(13);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬─────┐
         │ 0│ 1 │ 01  │
         │ 1│ 2 │ 02  │
@@ -1600,8 +1571,8 @@ mod test {
             width: 3,
             height: 4,
         };
-        viewport.resize(&mut doc, new_dimensions);
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.resize(new_dimensions);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬─────┐
         │ 0│ 11│ 11  │
         │ 1│ 12│ 12  │
@@ -1611,10 +1582,10 @@ mod test {
         ");
 
         // Same as above, but now with scrolloff = 1; the new cursor position obeys scrolloff.
-        let (mut doc, mut viewport) = init(text, 3, 15, 1);
-        viewport.move_cursor_down(&doc, 13);
-        viewport.resize(&mut doc, new_dimensions);
-        assert_snapshot!(viewport.render(&doc), @r"
+        let mut viewer = init(text, 3, 15, 1);
+        viewer.move_cursor_down(13);
+        viewer.resize(new_dimensions);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬─────┐
         │ 0│ 12│ 12  │
         │ 1│ 13│ 13  │
@@ -1624,10 +1595,10 @@ mod test {
         ");
 
         let text = b"a\nb\nc\nd\nxxxxxxxxxxxxxxxxxxxx\ne\nf\ng\n";
-        let (mut doc, mut viewport) = init(text, 3, 5, 2);
-        viewport.move_cursor_down(&doc, 3);
-        viewport.scroll_viewport_down(&doc, 2);
-        assert_snapshot!(viewport.render(&doc), @r"
+        let mut viewer = init(text, 3, 5, 2);
+        viewer.move_cursor_down(3);
+        viewer.scroll_viewport_down(2);
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬─────┐
         │ 0│ 4 │ d   │
         │ 1│*5 │ xxx↩│
@@ -1638,14 +1609,11 @@ mod test {
         ");
 
         // Anchor point is second line, but snaps into viewport.
-        viewport.resize(
-            &mut doc,
-            Dimensions {
-                width: 30,
-                height: 5,
-            },
-        );
-        assert_snapshot!(viewport.render(&doc), @r"
+        viewer.resize(Dimensions {
+            width: 30,
+            height: 5,
+        });
+        assert_snapshot!(viewer.render(), @r"
         ┌SI┬─L#┬────────────────────────────────┐
         │ 0│ 3 │ c                              │
         │ 1│ 4 │ d                              │
