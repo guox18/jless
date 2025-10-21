@@ -84,6 +84,8 @@ impl<D: Document> App<D> {
             let action = match tty_event {
                 TermionEvent::Key(Key::Char('j')) => Some(Action::MoveCursorDown(1)),
                 TermionEvent::Key(Key::Char('k')) => Some(Action::MoveCursorUp(1)),
+                TermionEvent::Key(Key::Char('g')) => Some(Action::FocusTop),
+                TermionEvent::Key(Key::Char('G')) => Some(Action::FocusBottom),
                 TermionEvent::Key(Key::Ctrl('e')) => Some(Action::ScrollViewportDown(1)),
                 TermionEvent::Key(Key::Ctrl('y')) => Some(Action::ScrollViewportUp(1)),
                 _ => None,

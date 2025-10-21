@@ -148,6 +148,35 @@ impl<D: Document> DocumentViewer<D> {
         self.update_so_new_cursor_is_visible(self.doc.move_cursor_up(lines, &self.current_focus));
     }
 
+    pub fn focus_top(&mut self) {
+        let (top_screen_line, cursor) = self
+            .doc
+            .top_screen_line_and_cursor()
+            .expect("top_screen_line_and_cursor to be Some if we've created a DocumentViewer");
+        self.top_line = top_screen_line;
+        self.current_focus = cursor;
+    }
+
+    pub fn focus_bottom(&mut self) {
+        let (bottom_screen_line, cursor) = self
+            .doc
+            .bottom_screen_line_and_cursor()
+            .expect("bottom_screen_line_and_cursor to be Some if we've created a DocumentViewer");
+
+        // If we scrolled past the previous bottom of the document, it's possible the new bottom is
+        // already on the screen. Using this as the `top_line` will put the end of last node at the
+        // bottom of the viewport. If the current top line is before this, then the bottom _isn't_
+        // on screen, and we need to update the top line, but otherwise we're fine, and we don't
+        // need to update anything.
+        let potential_top_line = self
+            .n_screen_lines_before_or_top_of_doc(bottom_screen_line, self.dimensions.height - 1);
+        if self.top_line < potential_top_line {
+            self.top_line = potential_top_line;
+        }
+
+        self.current_focus = cursor;
+    }
+
     pub fn scroll_viewport_down(&mut self, mut lines: usize) {
         let mut lines_scrolled = 0;
         let mut next_top_line = self.top_line.clone();
@@ -693,6 +722,8 @@ impl<D: Document> DocumentViewer<D> {
             Action::MoveCursorUp(n) => self.move_cursor_up(n),
             Action::ScrollViewportDown(n) => self.scroll_viewport_down(n),
             Action::ScrollViewportUp(n) => self.scroll_viewport_up(n),
+            Action::FocusTop => self.focus_top(),
+            Action::FocusBottom => self.focus_bottom(),
         }
     }
 
@@ -1302,6 +1333,65 @@ mod test {
         │ 1│ 2 │ b  │
         │ 2│*3 │ c1↩│
         │ 3│*3 │↪c2↩│
+        └──┴───┴────┘
+        ");
+    }
+
+    #[test]
+    fn test_focus_top_and_bottom() {
+        let mut viewer = init(b"a\nb\nc\nd\ne\nffff\n", 2, 5, 1);
+        assert_snapshot!(viewer.render(), @r"
+        ┌SI┬─L#┬────┐
+        │ 0│*1 │ a  │
+        │ 1│ 2 │ b  │
+        │ 2│ 3 │ c  │
+        │ 3│ 4 │ d  │
+        │ 4│ 5 │ e  │
+        └──┴───┴────┘
+        ");
+
+        viewer.focus_bottom();
+        assert_snapshot!(viewer.render(), @r"
+        ┌SI┬─L#┬────┐
+        │ 0│ 3 │ c  │
+        │ 1│ 4 │ d  │
+        │ 2│ 5 │ e  │
+        │ 3│*6 │ ff↩│
+        │ 4│*6 │↪ff │
+        └──┴───┴────┘
+        ");
+
+        viewer.scroll_viewport_down(1);
+        viewer.move_cursor_up(1);
+        assert_snapshot!(viewer.render(), @r"
+        ┌SI┬─L#┬────┐
+        │ 0│ 4 │ d  │
+        │ 1│*5 │ e  │
+        │ 2│ 6 │ ff↩│
+        │ 3│ 6 │↪ff │
+        │ 4│ ~ │    │
+        └──┴───┴────┘
+        ");
+
+        viewer.focus_bottom();
+        assert_snapshot!(viewer.render(), @r"
+        ┌SI┬─L#┬────┐
+        │ 0│ 4 │ d  │
+        │ 1│ 5 │ e  │
+        │ 2│*6 │ ff↩│
+        │ 3│*6 │↪ff │
+        │ 4│ ~ │    │
+        └──┴───┴────┘
+        ");
+
+        viewer.focus_top();
+        assert_snapshot!(viewer.render(), @r"
+        ┌SI┬─L#┬────┐
+        │ 0│*1 │ a  │
+        │ 1│ 2 │ b  │
+        │ 2│ 3 │ c  │
+        │ 3│ 4 │ d  │
+        │ 4│ 5 │ e  │
         └──┴───┴────┘
         ");
     }

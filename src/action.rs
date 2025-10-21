@@ -8,4 +8,7 @@ pub enum Action {
 
     ScrollViewportDown(usize),
     ScrollViewportUp(usize),
+
+    FocusTop,
+    FocusBottom,
 }

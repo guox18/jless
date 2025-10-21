@@ -23,6 +23,7 @@ pub trait Document {
     // Someday: This initialization is clumsy, but we need to know how
     // many lines there are before we know how much space we'll have...
     fn top_screen_line_and_cursor(&self) -> Option<(Self::ScreenLine, Self::Cursor)>;
+    fn bottom_screen_line_and_cursor(&self) -> Option<(Self::ScreenLine, Self::Cursor)>;
 
     fn next_screen_line(&self, screen_line: &Self::ScreenLine) -> Option<Self::ScreenLine>;
 

@@ -298,6 +298,17 @@ impl Document for TextDocument {
         Some((screen_line, cursor))
     }
 
+    fn bottom_screen_line_and_cursor(&self) -> Option<(ScreenLine, Cursor)> {
+        if self.complete_line_ranges.is_empty() {
+            return None;
+        }
+
+        let last_line = self.complete_line_ranges.len() - 1;
+        let screen_line = self.create_ref_to_end_of_line(last_line);
+        let cursor = last_line;
+        Some((screen_line, cursor))
+    }
+
     fn next_screen_line(&self, screen_line: &ScreenLine) -> Option<ScreenLine> {
         let num_lines = self.num_lines();
         let next_line_index = screen_line.line_index + 1;
