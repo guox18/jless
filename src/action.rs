@@ -1,3 +1,4 @@
+#[derive(Debug, Copy, Clone)]
 pub enum Action {
     // Does nothing, for debugging, shouldn't modify any state.
     #[allow(dead_code)]

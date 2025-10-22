@@ -21,6 +21,9 @@ mod text_document;
 // Someday: This is temporary, will probably want to rewrite this.
 mod terminal;
 
+#[cfg(test)]
+mod test_helpers;
+
 use app::{App, Break};
 use document::Document;
 

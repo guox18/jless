@@ -771,6 +771,7 @@ mod test {
     use std::fmt::Write;
 
     use crate::dimensions::Dimensions;
+    use crate::test_helpers::format_table;
     use crate::text_document::{Cursor, TextDocument};
 
     fn init(
@@ -786,6 +787,30 @@ mod test {
         let (top_line, initial_cursor) = doc.top_screen_line_and_cursor().unwrap();
         let dimensions = Dimensions { width, height };
         DocumentViewer::new(doc, top_line, initial_cursor, dimensions, scrolloff)
+    }
+
+    fn move_cursor_down(n: usize) -> Action {
+        Action::MoveCursorDown(n)
+    }
+
+    fn move_cursor_up(n: usize) -> Action {
+        Action::MoveCursorUp(n)
+    }
+
+    fn scroll_viewport_down(n: usize) -> Action {
+        Action::ScrollViewportDown(n)
+    }
+
+    fn scroll_viewport_up(n: usize) -> Action {
+        Action::ScrollViewportUp(n)
+    }
+
+    fn focus_top() -> Action {
+        Action::FocusTop
+    }
+
+    fn focus_bottom() -> Action {
+        Action::FocusBottom
     }
 
     impl<D: Document> DocumentViewer<D> {
@@ -825,10 +850,41 @@ mod test {
         }
     }
 
+    fn run_actions<D: Document>(
+        viewer: &mut DocumentViewer<D>,
+        mut actions: Vec<Vec<Action>>,
+    ) -> String {
+        actions.insert(0, vec![]);
+
+        let formatted_actions: Vec<String> = actions
+            .iter()
+            .map(|actions| {
+                actions
+                    .iter()
+                    .map(|action| format!("{:?}", action))
+                    .collect::<Vec<String>>()
+                    .join("\n")
+            })
+            .collect();
+
+        let renders: Vec<String> = actions
+            .iter()
+            .map(|actions| {
+                for action in actions.iter() {
+                    viewer.do_action(*action);
+                }
+                viewer.render()
+            })
+            .collect();
+
+        format_table(&vec![formatted_actions, renders], false)
+    }
+
     #[test]
     fn test_render() {
-        let viewer = init(b"aaa\nbb\ncccc\ndddddd\ne\n", 4, 7, 0);
-        assert_snapshot!(viewer.render(), @r"
+        let mut viewer = init(b"aaa\nbb\ncccc\ndddddd\ne\n", 4, 7, 0);
+        let output = run_actions(&mut viewer, vec![]);
+        assert_snapshot!(output, @r"
         ┌SI┬─L#┬──────┐
         │ 0│*1 │ aaa  │
         │ 1│ 2 │ bb   │
@@ -996,68 +1052,27 @@ mod test {
     #[test]
     fn test_move_cursor_up_and_down() {
         let mut viewer = init(b"aaa\nbb\ncccc\ndddddd\ne\n", 4, 7, 0);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│*1 │ aaa  │
-        │ 1│ 2 │ bb   │
-        │ 2│ 3 │ cccc │
-        │ 3│ 4 │ dddd↩│
-        │ 4│ 4 │↪dd   │
-        │ 5│ 5 │ e    │
-        │ 6│ ~ │      │
-        └──┴───┴──────┘
-        ");
 
-        viewer.move_cursor_down(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 1 │ aaa  │
-        │ 1│*2 │ bb   │
-        │ 2│ 3 │ cccc │
-        │ 3│ 4 │ dddd↩│
-        │ 4│ 4 │↪dd   │
-        │ 5│ 5 │ e    │
-        │ 6│ ~ │      │
-        └──┴───┴──────┘
-        ");
-
-        viewer.move_cursor_down(3);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 1 │ aaa  │
-        │ 1│ 2 │ bb   │
-        │ 2│ 3 │ cccc │
-        │ 3│ 4 │ dddd↩│
-        │ 4│ 4 │↪dd   │
-        │ 5│*5 │ e    │
-        │ 6│ ~ │      │
-        └──┴───┴──────┘
-        ");
-
-        viewer.move_cursor_up(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 1 │ aaa  │
-        │ 1│ 2 │ bb   │
-        │ 2│ 3 │ cccc │
-        │ 3│*4 │ dddd↩│
-        │ 4│*4 │↪dd   │
-        │ 5│ 5 │ e    │
-        │ 6│ ~ │      │
-        └──┴───┴──────┘
-        ");
-
-        viewer.move_cursor_up(10);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│*1 │ aaa  │
-        │ 1│ 2 │ bb   │
-        │ 2│ 3 │ cccc │
-        │ 3│ 4 │ dddd↩│
-        │ 4│ 4 │↪dd   │
-        │ 5│ 5 │ e    │
-        │ 6│ ~ │      │
-        └──┴───┴──────┘
+        let output = run_actions(
+            &mut viewer,
+            vec![
+                vec![move_cursor_down(1)],
+                vec![move_cursor_down(3)],
+                vec![move_cursor_up(1)],
+                vec![move_cursor_up(10)],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                        MoveCursorDown(1) MoveCursorDown(3) MoveCursorUp(1) MoveCursorUp(10)
+        ┌SI┬─L#┬──────┐ ┌SI┬─L#┬──────┐   ┌SI┬─L#┬──────┐   ┌SI┬─L#┬──────┐ ┌SI┬─L#┬──────┐
+        │ 0│*1 │ aaa  │ │ 0│ 1 │ aaa  │   │ 0│ 1 │ aaa  │   │ 0│ 1 │ aaa  │ │ 0│*1 │ aaa  │
+        │ 1│ 2 │ bb   │ │ 1│*2 │ bb   │   │ 1│ 2 │ bb   │   │ 1│ 2 │ bb   │ │ 1│ 2 │ bb   │
+        │ 2│ 3 │ cccc │ │ 2│ 3 │ cccc │   │ 2│ 3 │ cccc │   │ 2│ 3 │ cccc │ │ 2│ 3 │ cccc │
+        │ 3│ 4 │ dddd↩│ │ 3│ 4 │ dddd↩│   │ 3│ 4 │ dddd↩│   │ 3│*4 │ dddd↩│ │ 3│ 4 │ dddd↩│
+        │ 4│ 4 │↪dd   │ │ 4│ 4 │↪dd   │   │ 4│ 4 │↪dd   │   │ 4│*4 │↪dd   │ │ 4│ 4 │↪dd   │
+        │ 5│ 5 │ e    │ │ 5│ 5 │ e    │   │ 5│*5 │ e    │   │ 5│ 5 │ e    │ │ 5│ 5 │ e    │
+        │ 6│ ~ │      │ │ 6│ ~ │      │   │ 6│ ~ │      │   │ 6│ ~ │      │ │ 6│ ~ │      │
+        └──┴───┴──────┘ └──┴───┴──────┘   └──┴───┴──────┘   └──┴───┴──────┘ └──┴───┴──────┘
         ");
     }
 
@@ -1069,69 +1084,25 @@ mod test {
             5,
             1,
         );
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│*1 │ aaa  │
-        │ 1│ 2 │ bb   │
-        │ 2│ 3 │ cccc │
-        │ 3│ 4 │ dddd↩│
-        │ 4│ 4 │↪dd   │
-        └──┴───┴──────┘
-        ");
-
-        viewer.move_cursor_down(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 1 │ aaa  │
-        │ 1│*2 │ bb   │
-        │ 2│ 3 │ cccc │
-        │ 3│ 4 │ dddd↩│
-        │ 4│ 4 │↪dd   │
-        └──┴───┴──────┘
-        ");
-
-        viewer.move_cursor_down(2);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 2 │ bb   │
-        │ 1│ 3 │ cccc │
-        │ 2│*4 │ dddd↩│
-        │ 3│*4 │↪dd   │
-        │ 4│ 5 │ eeee↩│
-        └──┴───┴──────┘
-        ");
-
-        viewer.move_cursor_down(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 4 │ dddd↩│
-        │ 1│ 4 │↪dd   │
-        │ 2│*5 │ eeee↩│
-        │ 3│*5 │↪eee  │
-        │ 4│ 6 │ ff   │
-        └──┴───┴──────┘
-        ");
-
-        viewer.move_cursor_up(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 3 │ cccc │
-        │ 1│*4 │ dddd↩│
-        │ 2│*4 │↪dd   │
-        │ 3│ 5 │ eeee↩│
-        │ 4│ 5 │↪eee  │
-        └──┴───┴──────┘
-        ");
-
-        viewer.move_cursor_down(100);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 6 │ ff   │
-        │ 1│ 7 │ gggg↩│
-        │ 2│ 7 │↪g    │
-        │ 3│ 8 │ hh   │
-        │ 4│*9 │ i    │
-        └──┴───┴──────┘
+        let output = run_actions(
+            &mut viewer,
+            vec![
+                vec![move_cursor_down(1)],
+                vec![move_cursor_down(2)],
+                vec![move_cursor_down(1)],
+                vec![move_cursor_up(1)],
+                vec![move_cursor_down(100)],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                        MoveCursorDown(1) MoveCursorDown(2) MoveCursorDown(1) MoveCursorUp(1) MoveCursorDown(100)
+        ┌SI┬─L#┬──────┐ ┌SI┬─L#┬──────┐   ┌SI┬─L#┬──────┐   ┌SI┬─L#┬──────┐   ┌SI┬─L#┬──────┐ ┌SI┬─L#┬──────┐
+        │ 0│*1 │ aaa  │ │ 0│ 1 │ aaa  │   │ 0│ 2 │ bb   │   │ 0│ 4 │ dddd↩│   │ 0│ 3 │ cccc │ │ 0│ 6 │ ff   │
+        │ 1│ 2 │ bb   │ │ 1│*2 │ bb   │   │ 1│ 3 │ cccc │   │ 1│ 4 │↪dd   │   │ 1│*4 │ dddd↩│ │ 1│ 7 │ gggg↩│
+        │ 2│ 3 │ cccc │ │ 2│ 3 │ cccc │   │ 2│*4 │ dddd↩│   │ 2│*5 │ eeee↩│   │ 2│*4 │↪dd   │ │ 2│ 7 │↪g    │
+        │ 3│ 4 │ dddd↩│ │ 3│ 4 │ dddd↩│   │ 3│*4 │↪dd   │   │ 3│*5 │↪eee  │   │ 3│ 5 │ eeee↩│ │ 3│ 8 │ hh   │
+        │ 4│ 4 │↪dd   │ │ 4│ 4 │↪dd   │   │ 4│ 5 │ eeee↩│   │ 4│ 6 │ ff   │   │ 4│ 5 │↪eee  │ │ 4│*9 │ i    │
+        └──┴───┴──────┘ └──┴───┴──────┘   └──┴───┴──────┘   └──┴───┴──────┘   └──┴───┴──────┘ └──┴───┴──────┘
         ");
     }
 
@@ -1143,256 +1114,110 @@ mod test {
             5,
             1,
         );
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│*1 │ aaa  │
-        │ 1│ 2 │ bb   │
-        │ 2│ 3 │ cccc │
-        │ 3│ 4 │ dddd↩│
-        │ 4│ 4 │↪dd   │
-        └──┴───┴──────┘
+        let output = run_actions(
+            &mut viewer,
+            vec![
+                vec![scroll_viewport_down(1)],
+                vec![scroll_viewport_down(1)],
+                vec![scroll_viewport_down(1)],
+                vec![scroll_viewport_down(1)],
+                vec![scroll_viewport_down(10)],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                        ScrollViewportDown(1) ScrollViewportDown(1) ScrollViewportDown(1) ScrollViewportDown(1) ScrollViewportDown(10)
+        ┌SI┬─L#┬──────┐ ┌SI┬─L#┬──────┐       ┌SI┬─L#┬──────┐       ┌SI┬─L#┬──────┐       ┌SI┬─L#┬──────┐       ┌SI┬─L#┬──────┐
+        │ 0│*1 │ aaa  │ │ 0│ 2 │ bb   │       │ 0│ 3 │ cccc │       │ 0│*4 │ dddd↩│       │ 0│ 4 │↪dd   │       │ 0│*9 │ i    │
+        │ 1│ 2 │ bb   │ │ 1│*3 │ cccc │       │ 1│*4 │ dddd↩│       │ 1│*4 │↪dd   │       │ 1│*5 │ eeee↩│       │ 1│ ~ │      │
+        │ 2│ 3 │ cccc │ │ 2│ 4 │ dddd↩│       │ 2│*4 │↪dd   │       │ 2│ 5 │ eeee↩│       │ 2│*5 │↪eee  │       │ 2│ ~ │      │
+        │ 3│ 4 │ dddd↩│ │ 3│ 4 │↪dd   │       │ 3│ 5 │ eeee↩│       │ 3│ 5 │↪eee  │       │ 3│ 6 │ ff   │       │ 3│ ~ │      │
+        │ 4│ 4 │↪dd   │ │ 4│ 5 │ eeee↩│       │ 4│ 5 │↪eee  │       │ 4│ 6 │ ff   │       │ 4│ 7 │ gggg↩│       │ 4│ ~ │      │
+        └──┴───┴──────┘ └──┴───┴──────┘       └──┴───┴──────┘       └──┴───┴──────┘       └──┴───┴──────┘       └──┴───┴──────┘
         ");
 
-        viewer.scroll_viewport_down(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 2 │ bb   │
-        │ 1│*3 │ cccc │
-        │ 2│ 4 │ dddd↩│
-        │ 3│ 4 │↪dd   │
-        │ 4│ 5 │ eeee↩│
-        └──┴───┴──────┘
-        ");
-
-        viewer.scroll_viewport_down(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 3 │ cccc │
-        │ 1│*4 │ dddd↩│
-        │ 2│*4 │↪dd   │
-        │ 3│ 5 │ eeee↩│
-        │ 4│ 5 │↪eee  │
-        └──┴───┴──────┘
-        ");
-
-        viewer.scroll_viewport_down(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│*4 │ dddd↩│
-        │ 1│*4 │↪dd   │
-        │ 2│ 5 │ eeee↩│
-        │ 3│ 5 │↪eee  │
-        │ 4│ 6 │ ff   │
-        └──┴───┴──────┘
-        ");
-
-        viewer.scroll_viewport_down(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 4 │↪dd   │
-        │ 1│*5 │ eeee↩│
-        │ 2│*5 │↪eee  │
-        │ 3│ 6 │ ff   │
-        │ 4│ 7 │ gggg↩│
-        └──┴───┴──────┘
-        ");
-
-        viewer.scroll_viewport_down(10);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│*9 │ i    │
-        │ 1│ ~ │      │
-        │ 2│ ~ │      │
-        │ 3│ ~ │      │
-        │ 4│ ~ │      │
-        └──┴───┴──────┘
-        ");
-
-        viewer.scroll_viewport_up(4);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 6 │ ff   │
-        │ 1│ 7 │ gggg↩│
-        │ 2│ 7 │↪g    │
-        │ 3│*8 │ hh   │
-        │ 4│ 9 │ i    │
-        └──┴───┴──────┘
-        ");
-
-        viewer.scroll_viewport_up(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 5 │↪eee  │
-        │ 1│ 6 │ ff   │
-        │ 2│*7 │ gggg↩│
-        │ 3│*7 │↪g    │
-        │ 4│ 8 │ hh   │
-        └──┴───┴──────┘
-        ");
-
-        viewer.scroll_viewport_up(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 5 │ eeee↩│
-        │ 1│ 5 │↪eee  │
-        │ 2│ 6 │ ff   │
-        │ 3│*7 │ gggg↩│
-        │ 4│*7 │↪g    │
-        └──┴───┴──────┘
-        ");
-
-        viewer.scroll_viewport_up(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 4 │↪dd   │
-        │ 1│ 5 │ eeee↩│
-        │ 2│ 5 │↪eee  │
-        │ 3│*6 │ ff   │
-        │ 4│ 7 │ gggg↩│
-        └──┴───┴──────┘
-        ");
-
-        viewer.scroll_viewport_up(10);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│ 1 │ aaa  │
-        │ 1│ 2 │ bb   │
-        │ 2│ 3 │ cccc │
-        │ 3│*4 │ dddd↩│
-        │ 4│*4 │↪dd   │
-        └──┴───┴──────┘
+        let output = run_actions(
+            &mut viewer,
+            vec![
+                vec![scroll_viewport_up(4)],
+                vec![scroll_viewport_up(1)],
+                vec![scroll_viewport_up(1)],
+                vec![scroll_viewport_up(1)],
+                vec![scroll_viewport_up(10)],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                        ScrollViewportUp(4) ScrollViewportUp(1) ScrollViewportUp(1) ScrollViewportUp(1) ScrollViewportUp(10)
+        ┌SI┬─L#┬──────┐ ┌SI┬─L#┬──────┐     ┌SI┬─L#┬──────┐     ┌SI┬─L#┬──────┐     ┌SI┬─L#┬──────┐     ┌SI┬─L#┬──────┐
+        │ 0│*9 │ i    │ │ 0│ 6 │ ff   │     │ 0│ 5 │↪eee  │     │ 0│ 5 │ eeee↩│     │ 0│ 4 │↪dd   │     │ 0│ 1 │ aaa  │
+        │ 1│ ~ │      │ │ 1│ 7 │ gggg↩│     │ 1│ 6 │ ff   │     │ 1│ 5 │↪eee  │     │ 1│ 5 │ eeee↩│     │ 1│ 2 │ bb   │
+        │ 2│ ~ │      │ │ 2│ 7 │↪g    │     │ 2│*7 │ gggg↩│     │ 2│ 6 │ ff   │     │ 2│ 5 │↪eee  │     │ 2│ 3 │ cccc │
+        │ 3│ ~ │      │ │ 3│*8 │ hh   │     │ 3│*7 │↪g    │     │ 3│*7 │ gggg↩│     │ 3│*6 │ ff   │     │ 3│*4 │ dddd↩│
+        │ 4│ ~ │      │ │ 4│ 9 │ i    │     │ 4│ 8 │ hh   │     │ 4│*7 │↪g    │     │ 4│ 7 │ gggg↩│     │ 4│*4 │↪dd   │
+        └──┴───┴──────┘ └──┴───┴──────┘     └──┴───┴──────┘     └──┴───┴──────┘     └──┴───┴──────┘     └──┴───┴──────┘
         ");
     }
 
     #[test]
     fn test_scrolling_with_very_long_line() {
         let mut viewer = init(b"a\nb\nc1c2c3c4c5c6c7c8\nd\ne\n", 2, 4, 1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────┐
-        │ 0│*1 │ a  │
-        │ 1│ 2 │ b  │
-        │ 2│ 3 │ c1↩│
-        │ 3│ 3 │↪c2↩│
-        └──┴───┴────┘
+        let output = run_actions(
+            &mut viewer,
+            vec![
+                vec![scroll_viewport_down(2)],
+                vec![scroll_viewport_down(4)],
+                vec![scroll_viewport_down(2)],
+                vec![scroll_viewport_down(1)],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                      ScrollViewportDown(2) ScrollViewportDown(4) ScrollViewportDown(2) ScrollViewportDown(1)
+        ┌SI┬─L#┬────┐ ┌SI┬─L#┬────┐         ┌SI┬─L#┬────┐         ┌SI┬─L#┬────┐         ┌SI┬─L#┬────┐
+        │ 0│*1 │ a  │ │ 0│*3 │ c1↩│         │ 0│*3 │↪c5↩│         │ 0│*3 │↪c7↩│         │ 0│ 3 │↪c8 │
+        │ 1│ 2 │ b  │ │ 1│*3 │↪c2↩│         │ 1│*3 │↪c6↩│         │ 1│*3 │↪c8 │         │ 1│*4 │ d  │
+        │ 2│ 3 │ c1↩│ │ 2│*3 │↪c3↩│         │ 2│*3 │↪c7↩│         │ 2│ 4 │ d  │         │ 2│ 5 │ e  │
+        │ 3│ 3 │↪c2↩│ │ 3│*3 │↪c4↩│         │ 3│*3 │↪c8 │         │ 3│ 5 │ e  │         │ 3│ ~ │    │
+        └──┴───┴────┘ └──┴───┴────┘         └──┴───┴────┘         └──┴───┴────┘         └──┴───┴────┘
         ");
 
-        viewer.scroll_viewport_down(2);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────┐
-        │ 0│*3 │ c1↩│
-        │ 1│*3 │↪c2↩│
-        │ 2│*3 │↪c3↩│
-        │ 3│*3 │↪c4↩│
-        └──┴───┴────┘
-        ");
-
-        viewer.scroll_viewport_down(4);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────┐
-        │ 0│*3 │↪c5↩│
-        │ 1│*3 │↪c6↩│
-        │ 2│*3 │↪c7↩│
-        │ 3│*3 │↪c8 │
-        └──┴───┴────┘
-        ");
-
-        viewer.scroll_viewport_down(2);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────┐
-        │ 0│*3 │↪c7↩│
-        │ 1│*3 │↪c8 │
-        │ 2│ 4 │ d  │
-        │ 3│ 5 │ e  │
-        └──┴───┴────┘
-        ");
-
-        viewer.scroll_viewport_down(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────┐
-        │ 0│ 3 │↪c8 │
-        │ 1│*4 │ d  │
-        │ 2│ 5 │ e  │
-        │ 3│ ~ │    │
-        └──┴───┴────┘
-        ");
-
-        viewer.scroll_viewport_up(2);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────┐
-        │ 0│*3 │↪c6↩│
-        │ 1│*3 │↪c7↩│
-        │ 2│*3 │↪c8 │
-        │ 3│ 4 │ d  │
-        └──┴───┴────┘
-        ");
-
-        viewer.scroll_viewport_up(7);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────┐
-        │ 0│ 1 │ a  │
-        │ 1│ 2 │ b  │
-        │ 2│*3 │ c1↩│
-        │ 3│*3 │↪c2↩│
-        └──┴───┴────┘
+        let output = run_actions(
+            &mut viewer,
+            vec![vec![scroll_viewport_up(2)], vec![scroll_viewport_up(7)]],
+        );
+        assert_snapshot!(output, @r"
+                      ScrollViewportUp(2) ScrollViewportUp(7)
+        ┌SI┬─L#┬────┐ ┌SI┬─L#┬────┐       ┌SI┬─L#┬────┐
+        │ 0│ 3 │↪c8 │ │ 0│*3 │↪c6↩│       │ 0│ 1 │ a  │
+        │ 1│*4 │ d  │ │ 1│*3 │↪c7↩│       │ 1│ 2 │ b  │
+        │ 2│ 5 │ e  │ │ 2│*3 │↪c8 │       │ 2│*3 │ c1↩│
+        │ 3│ ~ │    │ │ 3│ 4 │ d  │       │ 3│*3 │↪c2↩│
+        └──┴───┴────┘ └──┴───┴────┘       └──┴───┴────┘
         ");
     }
 
     #[test]
     fn test_focus_top_and_bottom() {
         let mut viewer = init(b"a\nb\nc\nd\ne\nffff\n", 2, 5, 1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────┐
-        │ 0│*1 │ a  │
-        │ 1│ 2 │ b  │
-        │ 2│ 3 │ c  │
-        │ 3│ 4 │ d  │
-        │ 4│ 5 │ e  │
-        └──┴───┴────┘
-        ");
-
-        viewer.focus_bottom();
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────┐
-        │ 0│ 3 │ c  │
-        │ 1│ 4 │ d  │
-        │ 2│ 5 │ e  │
-        │ 3│*6 │ ff↩│
-        │ 4│*6 │↪ff │
-        └──┴───┴────┘
-        ");
-
-        viewer.scroll_viewport_down(1);
-        viewer.move_cursor_up(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────┐
-        │ 0│ 4 │ d  │
-        │ 1│*5 │ e  │
-        │ 2│ 6 │ ff↩│
-        │ 3│ 6 │↪ff │
-        │ 4│ ~ │    │
-        └──┴───┴────┘
-        ");
-
-        viewer.focus_bottom();
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────┐
-        │ 0│ 4 │ d  │
-        │ 1│ 5 │ e  │
-        │ 2│*6 │ ff↩│
-        │ 3│*6 │↪ff │
-        │ 4│ ~ │    │
-        └──┴───┴────┘
-        ");
-
-        viewer.focus_top();
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────┐
-        │ 0│*1 │ a  │
-        │ 1│ 2 │ b  │
-        │ 2│ 3 │ c  │
-        │ 3│ 4 │ d  │
-        │ 4│ 5 │ e  │
-        └──┴───┴────┘
+        let output = run_actions(
+            &mut viewer,
+            vec![
+                vec![focus_bottom()],
+                vec![move_cursor_up(1), scroll_viewport_down(1)],
+                // Don't move the last line to the bottom of the viewport
+                // if it's already visible.
+                vec![focus_bottom()],
+                vec![focus_top()],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                      FocusBottom   MoveCursorUp(1)       FocusBottom   FocusTop
+                                    ScrollViewportDown(1)
+        ┌SI┬─L#┬────┐ ┌SI┬─L#┬────┐ ┌SI┬─L#┬────┐         ┌SI┬─L#┬────┐ ┌SI┬─L#┬────┐
+        │ 0│*1 │ a  │ │ 0│ 3 │ c  │ │ 0│ 4 │ d  │         │ 0│ 4 │ d  │ │ 0│*1 │ a  │
+        │ 1│ 2 │ b  │ │ 1│ 4 │ d  │ │ 1│*5 │ e  │         │ 1│ 5 │ e  │ │ 1│ 2 │ b  │
+        │ 2│ 3 │ c  │ │ 2│ 5 │ e  │ │ 2│ 6 │ ff↩│         │ 2│*6 │ ff↩│ │ 2│ 3 │ c  │
+        │ 3│ 4 │ d  │ │ 3│*6 │ ff↩│ │ 3│ 6 │↪ff │         │ 3│*6 │↪ff │ │ 3│ 4 │ d  │
+        │ 4│ 5 │ e  │ │ 4│*6 │↪ff │ │ 4│ ~ │    │         │ 4│ ~ │    │ │ 4│ 5 │ e  │
+        └──┴───┴────┘ └──┴───┴────┘ └──┴───┴────┘         └──┴───┴────┘ └──┴───┴────┘
         ");
     }
 
