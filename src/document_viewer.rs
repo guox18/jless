@@ -768,7 +768,7 @@ mod test {
     use bstr::ByteSlice;
     use insta::{allow_duplicates, assert_debug_snapshot, assert_snapshot};
 
-    use std::fmt::Write;
+    use std::fmt::{self, Write};
 
     use crate::dimensions::Dimensions;
     use crate::test_helpers::format_table;
@@ -789,28 +789,63 @@ mod test {
         DocumentViewer::new(doc, top_line, initial_cursor, dimensions, scrolloff)
     }
 
-    fn move_cursor_down(n: usize) -> Action {
-        Action::MoveCursorDown(n)
+    #[derive(Copy, Clone)]
+    enum Change {
+        Action(Action),
+        ResizeWidth(usize),
+        ResizeHeight(usize),
+        Resize(Dimensions),
+        // AppendDocumentData(&'a [u8]),
+        // DocumentEof,
     }
 
-    fn move_cursor_up(n: usize) -> Action {
-        Action::MoveCursorUp(n)
+    impl fmt::Display for Change {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+            match self {
+                Change::Action(action) => write!(f, "{:?}", action),
+                Change::ResizeWidth(width) => write!(f, "ResizeWidth({})", width),
+                Change::ResizeHeight(height) => write!(f, "ResizeHeight({})", height),
+                Change::Resize(Dimensions { width, height }) => {
+                    write!(f, "Resize({{ width: {}, height: {} }})", width, height)
+                }
+            }
+        }
     }
 
-    fn scroll_viewport_down(n: usize) -> Action {
-        Action::ScrollViewportDown(n)
+    fn move_cursor_down(n: usize) -> Change {
+        Change::Action(Action::MoveCursorDown(n))
     }
 
-    fn scroll_viewport_up(n: usize) -> Action {
-        Action::ScrollViewportUp(n)
+    fn move_cursor_up(n: usize) -> Change {
+        Change::Action(Action::MoveCursorUp(n))
     }
 
-    fn focus_top() -> Action {
-        Action::FocusTop
+    fn scroll_viewport_down(n: usize) -> Change {
+        Change::Action(Action::ScrollViewportDown(n))
     }
 
-    fn focus_bottom() -> Action {
-        Action::FocusBottom
+    fn scroll_viewport_up(n: usize) -> Change {
+        Change::Action(Action::ScrollViewportUp(n))
+    }
+
+    fn focus_top() -> Change {
+        Change::Action(Action::FocusTop)
+    }
+
+    fn focus_bottom() -> Change {
+        Change::Action(Action::FocusBottom)
+    }
+
+    fn resize_width(width: usize) -> Change {
+        Change::ResizeWidth(width)
+    }
+
+    fn resize_height(height: usize) -> Change {
+        Change::ResizeHeight(height)
+    }
+
+    fn resize(dimensions: Dimensions) -> Change {
+        Change::Resize(dimensions)
     }
 
     impl<D: Document> DocumentViewer<D> {
@@ -848,42 +883,48 @@ mod test {
             writeln!(s, "└──┴───┴─{:─<content_width$}─┘", "").unwrap();
             s
         }
+
+        fn do_change(&mut self, change: Change) {
+            match change {
+                Change::Action(action) => self.do_action(action),
+                Change::ResizeWidth(width) => self.resize_width(width),
+                Change::ResizeHeight(height) => self.resize_height(height),
+                Change::Resize(dimensions) => self.resize(dimensions),
+            }
+        }
     }
 
-    fn run_actions<D: Document>(
-        viewer: &mut DocumentViewer<D>,
-        mut actions: Vec<Vec<Action>>,
-    ) -> String {
-        actions.insert(0, vec![]);
+    fn run<D: Document>(viewer: &mut DocumentViewer<D>, mut changes: Vec<Vec<Change>>) -> String {
+        changes.insert(0, vec![]);
 
-        let formatted_actions: Vec<String> = actions
+        let formatted_changes: Vec<String> = changes
             .iter()
-            .map(|actions| {
-                actions
+            .map(|changes| {
+                changes
                     .iter()
-                    .map(|action| format!("{:?}", action))
+                    .map(Change::to_string)
                     .collect::<Vec<String>>()
                     .join("\n")
             })
             .collect();
 
-        let renders: Vec<String> = actions
+        let renders: Vec<String> = changes
             .iter()
-            .map(|actions| {
-                for action in actions.iter() {
-                    viewer.do_action(*action);
+            .map(|changes| {
+                for change in changes.iter() {
+                    viewer.do_change(*change);
                 }
                 viewer.render()
             })
             .collect();
 
-        format_table(&vec![formatted_actions, renders], false)
+        format_table(&vec![formatted_changes, renders], false)
     }
 
     #[test]
     fn test_render() {
         let mut viewer = init(b"aaa\nbb\ncccc\ndddddd\ne\n", 4, 7, 0);
-        let output = run_actions(&mut viewer, vec![]);
+        let output = run(&mut viewer, vec![]);
         assert_snapshot!(output, @r"
         ┌SI┬─L#┬──────┐
         │ 0│*1 │ aaa  │
@@ -1053,7 +1094,7 @@ mod test {
     fn test_move_cursor_up_and_down() {
         let mut viewer = init(b"aaa\nbb\ncccc\ndddddd\ne\n", 4, 7, 0);
 
-        let output = run_actions(
+        let output = run(
             &mut viewer,
             vec![
                 vec![move_cursor_down(1)],
@@ -1084,7 +1125,7 @@ mod test {
             5,
             1,
         );
-        let output = run_actions(
+        let output = run(
             &mut viewer,
             vec![
                 vec![move_cursor_down(1)],
@@ -1114,7 +1155,7 @@ mod test {
             5,
             1,
         );
-        let output = run_actions(
+        let output = run(
             &mut viewer,
             vec![
                 vec![scroll_viewport_down(1)],
@@ -1135,7 +1176,7 @@ mod test {
         └──┴───┴──────┘ └──┴───┴──────┘       └──┴───┴──────┘       └──┴───┴──────┘       └──┴───┴──────┘       └──┴───┴──────┘
         ");
 
-        let output = run_actions(
+        let output = run(
             &mut viewer,
             vec![
                 vec![scroll_viewport_up(4)],
@@ -1160,7 +1201,7 @@ mod test {
     #[test]
     fn test_scrolling_with_very_long_line() {
         let mut viewer = init(b"a\nb\nc1c2c3c4c5c6c7c8\nd\ne\n", 2, 4, 1);
-        let output = run_actions(
+        let output = run(
             &mut viewer,
             vec![
                 vec![scroll_viewport_down(2)],
@@ -1179,7 +1220,7 @@ mod test {
         └──┴───┴────┘ └──┴───┴────┘         └──┴───┴────┘         └──┴───┴────┘         └──┴───┴────┘
         ");
 
-        let output = run_actions(
+        let output = run(
             &mut viewer,
             vec![vec![scroll_viewport_up(2)], vec![scroll_viewport_up(7)]],
         );
@@ -1197,7 +1238,7 @@ mod test {
     #[test]
     fn test_focus_top_and_bottom() {
         let mut viewer = init(b"a\nb\nc\nd\ne\nffff\n", 2, 5, 1);
-        let output = run_actions(
+        let output = run(
             &mut viewer,
             vec![
                 vec![focus_bottom()],
@@ -1233,120 +1274,52 @@ mod test {
             h\n\
             i\n";
         let mut viewer = init(text, 5, 5, 0);
-        viewer.move_cursor_down(4);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬───────┐
-        │ 0│*5 │ 1eeee↩│
-        │ 1│*5 │↪2eeee↩│
-        │ 2│*5 │↪3eeee↩│
-        │ 3│*5 │↪4e!ee↩│
-        │ 4│*5 │↪5eeee↩│
-        └──┴───┴───────┘
-        ");
-        viewer.scroll_viewport_down(6);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬───────┐
-        │ 0│*5 │↪7eeee↩│
-        │ 1│*5 │↪8eeee↩│
-        │ 2│*5 │↪9eeee↩│
-        │ 3│*5 │↪0eeee │
-        │ 4│ 6 │ f     │
-        └──┴───┴───────┘
-        ");
-
-        // start AboveTopLine, end AtScreenIndex case, keep end of cursor in same spot
-        viewer.resize_width(25);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬───────────────────────────┐
-        │ 0│ 3 │ c                         │
-        │ 1│ 4 │ d                         │
-        │ 2│*5 │ 1eeee2eeee3eeee4e!ee5eeee↩│
-        │ 3│*5 │↪6eeee7eeee8eeee9eeee0eeee │
-        │ 4│ 6 │ f                         │
-        └──┴───┴───────────────────────────┘
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![move_cursor_down(4)],
+                vec![scroll_viewport_down(6)],
+                // start AboveTopLine, end AtScreenIndex case, keep end of cursor in same spot
+                vec![resize_width(25)],
+                // start AtScreenIndex case, keep start of cursor in same spot
+                vec![resize_width(5)],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                         MoveCursorDown(4) ScrollViewportDown(6) ResizeWidth(25)                      ResizeWidth(5)
+        ┌SI┬─L#┬───────┐ ┌SI┬─L#┬───────┐  ┌SI┬─L#┬───────┐      ┌SI┬─L#┬───────────────────────────┐ ┌SI┬─L#┬───────┐
+        │ 0│*1 │ a     │ │ 0│*5 │ 1eeee↩│  │ 0│*5 │↪7eeee↩│      │ 0│ 3 │ c                         │ │ 0│ 3 │ c     │
+        │ 1│ 2 │ b     │ │ 1│*5 │↪2eeee↩│  │ 1│*5 │↪8eeee↩│      │ 1│ 4 │ d                         │ │ 1│ 4 │ d     │
+        │ 2│ 3 │ c     │ │ 2│*5 │↪3eeee↩│  │ 2│*5 │↪9eeee↩│      │ 2│*5 │ 1eeee2eeee3eeee4e!ee5eeee↩│ │ 2│*5 │ 1eeee↩│
+        │ 3│ 4 │ d     │ │ 3│*5 │↪4e!ee↩│  │ 3│*5 │↪0eeee │      │ 3│*5 │↪6eeee7eeee8eeee9eeee0eeee │ │ 3│*5 │↪2eeee↩│
+        │ 4│ 5 │ 1eeee↩│ │ 4│*5 │↪5eeee↩│  │ 4│ 6 │ f     │      │ 4│ 6 │ f                         │ │ 4│*5 │↪3eeee↩│
+        └──┴───┴───────┘ └──┴───┴───────┘  └──┴───┴───────┘      └──┴───┴───────────────────────────┘ └──┴───┴───────┘
         ");
 
-        // start AtScreenIndex case, keep start of cursor in same spot
-        viewer.resize_width(5);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬───────┐
-        │ 0│ 3 │ c     │
-        │ 1│ 4 │ d     │
-        │ 2│*5 │ 1eeee↩│
-        │ 3│*5 │↪2eeee↩│
-        │ 4│*5 │↪3eeee↩│
-        └──┴───┴───────┘
-        ");
-
-        viewer.scroll_viewport_down(3);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬───────┐
-        │ 0│*5 │↪2eeee↩│
-        │ 1│*5 │↪3eeee↩│
-        │ 2│*5 │↪4e!ee↩│
-        │ 3│*5 │↪5eeee↩│
-        │ 4│*5 │↪6eeee↩│
-        └──┴───┴───────┘
-        ");
-
-        // Now we're showing chars 6-30 on screen, so char 18 out of 50 is in the middle, aka 36th
-        // percentile. If we make the screen 2 chars wide, we should see that in the middle of the
-        // screen.
-
-        viewer.resize_width(2);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────┐
-        │ 0│*5 │↪ee↩│
-        │ 1│*5 │↪e4↩│
-        │ 2│*5 │↪e!↩│
-        │ 3│*5 │↪ee↩│
-        │ 4│*5 │↪5e↩│
-        └──┴───┴────┘
-        ");
-
-        viewer.resize_width(3);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬─────┐
-        │ 0│*5 │↪e3e↩│
-        │ 1│*5 │↪eee↩│
-        │ 2│*5 │↪4e!↩│
-        │ 3│*5 │↪ee5↩│
-        │ 4│*5 │↪eee↩│
-        └──┴───┴─────┘
-        ");
-
-        viewer.resize_width(4);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬──────┐
-        │ 0│*5 │↪ee3e↩│
-        │ 1│*5 │↪eee4↩│
-        │ 2│*5 │↪e!ee↩│
-        │ 3│*5 │↪5eee↩│
-        │ 4│*5 │↪e6ee↩│
-        └──┴───┴──────┘
-        ");
-
-        viewer.resize_width(5);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬───────┐
-        │ 0│*5 │↪2eeee↩│
-        │ 1│*5 │↪3eeee↩│
-        │ 2│*5 │↪4e!ee↩│
-        │ 3│*5 │↪5eeee↩│
-        │ 4│*5 │↪6eeee↩│
-        └──┴───┴───────┘
-        ");
-
-        // Guess there's a slight off-by-one here, but seems fine.
-        viewer.resize_width(6);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────────┐
-        │ 0│*5 │↪eeee3e↩│
-        │ 1│*5 │↪eee4e!↩│
-        │ 2│*5 │↪ee5eee↩│
-        │ 3│*5 │↪e6eeee↩│
-        │ 4│*5 │↪7eeee8↩│
-        └──┴───┴────────┘
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![scroll_viewport_down(3)],
+                // Now we're showing chars 6-30 on screen, so char 18 out of 50 (the '!') is in the
+                // middle, which is the 36th percentile. If we make the screen 2 chars wide, we
+                // should still see that '!' in the middle of the screen.
+                vec![resize_width(2)],
+                vec![resize_width(3)],
+                vec![resize_width(4)],
+                vec![resize_width(5)],
+                // Guess there's a slight off-by-one here, but seems fine.
+                vec![resize_width(6)],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                         ScrollViewportDown(3) ResizeWidth(2) ResizeWidth(3) ResizeWidth(4)  ResizeWidth(5)   ResizeWidth(6)
+        ┌SI┬─L#┬───────┐ ┌SI┬─L#┬───────┐      ┌SI┬─L#┬────┐  ┌SI┬─L#┬─────┐ ┌SI┬─L#┬──────┐ ┌SI┬─L#┬───────┐ ┌SI┬─L#┬────────┐
+        │ 0│ 3 │ c     │ │ 0│*5 │↪2eeee↩│      │ 0│*5 │↪ee↩│  │ 0│*5 │↪e3e↩│ │ 0│*5 │↪ee3e↩│ │ 0│*5 │↪2eeee↩│ │ 0│*5 │↪eeee3e↩│
+        │ 1│ 4 │ d     │ │ 1│*5 │↪3eeee↩│      │ 1│*5 │↪e4↩│  │ 1│*5 │↪eee↩│ │ 1│*5 │↪eee4↩│ │ 1│*5 │↪3eeee↩│ │ 1│*5 │↪eee4e!↩│
+        │ 2│*5 │ 1eeee↩│ │ 2│*5 │↪4e!ee↩│      │ 2│*5 │↪e!↩│  │ 2│*5 │↪4e!↩│ │ 2│*5 │↪e!ee↩│ │ 2│*5 │↪4e!ee↩│ │ 2│*5 │↪ee5eee↩│
+        │ 3│*5 │↪2eeee↩│ │ 3│*5 │↪5eeee↩│      │ 3│*5 │↪ee↩│  │ 3│*5 │↪ee5↩│ │ 3│*5 │↪5eee↩│ │ 3│*5 │↪5eeee↩│ │ 3│*5 │↪e6eeee↩│
+        │ 4│*5 │↪3eeee↩│ │ 4│*5 │↪6eeee↩│      │ 4│*5 │↪5e↩│  │ 4│*5 │↪eee↩│ │ 4│*5 │↪e6ee↩│ │ 4│*5 │↪6eeee↩│ │ 4│*5 │↪7eeee8↩│
+        └──┴───┴───────┘ └──┴───┴───────┘      └──┴───┴────┘  └──┴───┴─────┘ └──┴───┴──────┘ └──┴───┴───────┘ └──┴───┴────────┘
         ");
     }
 
@@ -1362,107 +1335,98 @@ mod test {
             h\n\
             i\n";
         let mut viewer = init(text, 3, 5, 0);
-        viewer.move_cursor_down(4);
-        viewer.scroll_viewport_up(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬─────┐
-        │ 0│ 4 │ d   │
-        │ 1│*5 │ 1ee↩│
-        │ 2│*5 │↪2ee↩│
-        │ 3│*5 │↪3ee↩│
-        │ 4│*5 │↪4ee↩│
-        └──┴───┴─────┘
-        ");
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![move_cursor_down(4)],
+                vec![scroll_viewport_up(1)],
+                vec![resize_height(10)],
+            ],
+        );
 
-        viewer.resize_height(10);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬─────┐
-        │ 0│ 3 │ c   │
-        │ 1│ 4 │ d   │
-        │ 2│*5 │ 1ee↩│
-        │ 3│*5 │↪2ee↩│
-        │ 4│*5 │↪3ee↩│
-        │ 5│*5 │↪4ee↩│
-        │ 6│*5 │↪5ee↩│
-        │ 7│*5 │↪6ee↩│
-        │ 8│*5 │↪7ee↩│
-        │ 9│*5 │↪8ee↩│
-        └──┴───┴─────┘
+        assert_snapshot!(output, @r"
+                       MoveCursorDown(4) ScrollViewportUp(1) ResizeHeight(10)
+        ┌SI┬─L#┬─────┐ ┌SI┬─L#┬─────┐    ┌SI┬─L#┬─────┐      ┌SI┬─L#┬─────┐
+        │ 0│*1 │ a   │ │ 0│*5 │ 1ee↩│    │ 0│ 4 │ d   │      │ 0│ 3 │ c   │
+        │ 1│ 2 │ b   │ │ 1│*5 │↪2ee↩│    │ 1│*5 │ 1ee↩│      │ 1│ 4 │ d   │
+        │ 2│ 3 │ c   │ │ 2│*5 │↪3ee↩│    │ 2│*5 │↪2ee↩│      │ 2│*5 │ 1ee↩│
+        │ 3│ 4 │ d   │ │ 3│*5 │↪4ee↩│    │ 3│*5 │↪3ee↩│      │ 3│*5 │↪2ee↩│
+        │ 4│ 5 │ 1ee↩│ │ 4│*5 │↪5ee↩│    │ 4│*5 │↪4ee↩│      │ 4│*5 │↪3ee↩│
+        └──┴───┴─────┘ └──┴───┴─────┘    └──┴───┴─────┘      │ 5│*5 │↪4ee↩│
+                                                             │ 6│*5 │↪5ee↩│
+                                                             │ 7│*5 │↪6ee↩│
+                                                             │ 8│*5 │↪7ee↩│
+                                                             │ 9│*5 │↪8ee↩│
+                                                             └──┴───┴─────┘
         ");
 
         let mut viewer = init(text, 3, 5, 0);
-        viewer.move_cursor_down(4);
-        viewer.scroll_viewport_down(8);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬─────┐
-        │ 0│*5 │↪9ee↩│
-        │ 1│*5 │↪0ee │
-        │ 2│ 6 │ f   │
-        │ 3│ 7 │ g   │
-        │ 4│ 8 │ h   │
-        └──┴───┴─────┘
-        ");
-
-        viewer.resize_height(10);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬─────┐
-        │ 0│*5 │↪8ee↩│
-        │ 1│*5 │↪9ee↩│
-        │ 2│*5 │↪0ee │
-        │ 3│ 6 │ f   │
-        │ 4│ 7 │ g   │
-        │ 5│ 8 │ h   │
-        │ 6│ 9 │ i   │
-        │ 7│ ~ │     │
-        │ 8│ ~ │     │
-        │ 9│ ~ │     │
-        └──┴───┴─────┘
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![move_cursor_down(4)],
+                vec![scroll_viewport_down(8)],
+                // Roughly what we're aiming for; unclear why it's not four rows of line 5 after he
+                // resize.
+                vec![resize_height(10)],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                       MoveCursorDown(4) ScrollViewportDown(8) ResizeHeight(10)
+        ┌SI┬─L#┬─────┐ ┌SI┬─L#┬─────┐    ┌SI┬─L#┬─────┐        ┌SI┬─L#┬─────┐
+        │ 0│*1 │ a   │ │ 0│*5 │ 1ee↩│    │ 0│*5 │↪9ee↩│        │ 0│*5 │↪8ee↩│
+        │ 1│ 2 │ b   │ │ 1│*5 │↪2ee↩│    │ 1│*5 │↪0ee │        │ 1│*5 │↪9ee↩│
+        │ 2│ 3 │ c   │ │ 2│*5 │↪3ee↩│    │ 2│ 6 │ f   │        │ 2│*5 │↪0ee │
+        │ 3│ 4 │ d   │ │ 3│*5 │↪4ee↩│    │ 3│ 7 │ g   │        │ 3│ 6 │ f   │
+        │ 4│ 5 │ 1ee↩│ │ 4│*5 │↪5ee↩│    │ 4│ 8 │ h   │        │ 4│ 7 │ g   │
+        └──┴───┴─────┘ └──┴───┴─────┘    └──┴───┴─────┘        │ 5│ 8 │ h   │
+                                                               │ 6│ 9 │ i   │
+                                                               │ 7│ ~ │     │
+                                                               │ 8│ ~ │     │
+                                                               │ 9│ ~ │     │
+                                                               └──┴───┴─────┘
         ");
 
         let mut viewer = init(text, 3, 5, 0);
-        viewer.move_cursor_down(4);
-        viewer.scroll_viewport_down(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬─────┐
-        │ 0│*5 │↪2ee↩│
-        │ 1│*5 │↪3ee↩│
-        │ 2│*5 │↪4ee↩│
-        │ 3│*5 │↪5ee↩│
-        │ 4│*5 │↪6ee↩│
-        └──┴───┴─────┘
-        ");
-        viewer.resize_height(3);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬─────┐
-        │ 0│*5 │↪3ee↩│
-        │ 1│*5 │↪4ee↩│
-        │ 2│*5 │↪5ee↩│
-        └──┴───┴─────┘
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![move_cursor_down(4)],
+                vec![scroll_viewport_down(1)],
+                vec![resize_height(3)],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                       MoveCursorDown(4) ScrollViewportDown(1) ResizeHeight(3)
+        ┌SI┬─L#┬─────┐ ┌SI┬─L#┬─────┐    ┌SI┬─L#┬─────┐        ┌SI┬─L#┬─────┐
+        │ 0│*1 │ a   │ │ 0│*5 │ 1ee↩│    │ 0│*5 │↪2ee↩│        │ 0│*5 │↪3ee↩│
+        │ 1│ 2 │ b   │ │ 1│*5 │↪2ee↩│    │ 1│*5 │↪3ee↩│        │ 1│*5 │↪4ee↩│
+        │ 2│ 3 │ c   │ │ 2│*5 │↪3ee↩│    │ 2│*5 │↪4ee↩│        │ 2│*5 │↪5ee↩│
+        │ 3│ 4 │ d   │ │ 3│*5 │↪4ee↩│    │ 3│*5 │↪5ee↩│        └──┴───┴─────┘
+        │ 4│ 5 │ 1ee↩│ │ 4│*5 │↪5ee↩│    │ 4│*5 │↪6ee↩│
+        └──┴───┴─────┘ └──┴───┴─────┘    └──┴───┴─────┘
         ");
 
         let mut viewer = init(text, 10, 5, 0);
-        viewer.move_cursor_down(4);
-        viewer.scroll_viewport_down(1);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────────────┐
-        │ 0│ 4 │ d          │
-        │ 1│*5 │ 1ee2ee3ee4↩│
-        │ 2│*5 │↪ee5ee6ee7e↩│
-        │ 3│*5 │↪e8ee9ee0ee │
-        │ 4│ 6 │ f          │
-        └──┴───┴────────────┘
-        ");
-        viewer.resize_height(7);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────────────┐
-        │ 0│ 3 │ c          │
-        │ 1│ 4 │ d          │
-        │ 2│*5 │ 1ee2ee3ee4↩│
-        │ 3│*5 │↪ee5ee6ee7e↩│
-        │ 4│*5 │↪e8ee9ee0ee │
-        │ 5│ 6 │ f          │
-        │ 6│ 7 │ g          │
-        └──┴───┴────────────┘
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![move_cursor_down(4)],
+                vec![scroll_viewport_down(1)],
+                vec![resize_height(7)],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                              MoveCursorDown(4)     ScrollViewportDown(1) ResizeHeight(7)
+        ┌SI┬─L#┬────────────┐ ┌SI┬─L#┬────────────┐ ┌SI┬─L#┬────────────┐ ┌SI┬─L#┬────────────┐
+        │ 0│*1 │ a          │ │ 0│ 3 │ c          │ │ 0│ 4 │ d          │ │ 0│ 3 │ c          │
+        │ 1│ 2 │ b          │ │ 1│ 4 │ d          │ │ 1│*5 │ 1ee2ee3ee4↩│ │ 1│ 4 │ d          │
+        │ 2│ 3 │ c          │ │ 2│*5 │ 1ee2ee3ee4↩│ │ 2│*5 │↪ee5ee6ee7e↩│ │ 2│*5 │ 1ee2ee3ee4↩│
+        │ 3│ 4 │ d          │ │ 3│*5 │↪ee5ee6ee7e↩│ │ 3│*5 │↪e8ee9ee0ee │ │ 3│*5 │↪ee5ee6ee7e↩│
+        │ 4│ 5 │ 1ee2ee3ee4↩│ │ 4│*5 │↪e8ee9ee0ee │ │ 4│ 6 │ f          │ │ 4│*5 │↪e8ee9ee0ee │
+        └──┴───┴────────────┘ └──┴───┴────────────┘ └──┴───┴────────────┘ │ 5│ 6 │ f          │
+                                                                          │ 6│ 7 │ g          │
+                                                                          └──┴───┴────────────┘
         ");
     }
 
@@ -1472,14 +1436,58 @@ mod test {
             01\n02\n03\n04\n55\n06\n07\n08\n09\n10\n\
             11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n";
         let mut viewer = init(text, 3, 15, 0);
-        viewer.move_cursor_down(13);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬─────┐
-        │ 0│ 1 │ 01  │
-        │ 1│ 2 │ 02  │
-        │ 2│ 3 │ 03  │
-        │ 3│ 4 │ 04  │
-        │ 4│ 5 │ 55  │
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![move_cursor_down(13)],
+                vec![resize(Dimensions {
+                    width: 3,
+                    height: 4,
+                })],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                       MoveCursorDown(13) Resize({ width: 3, height: 4 })
+        ┌SI┬─L#┬─────┐ ┌SI┬─L#┬─────┐     ┌SI┬─L#┬─────┐
+        │ 0│*1 │ 01  │ │ 0│ 1 │ 01  │     │ 0│ 11│ 11  │
+        │ 1│ 2 │ 02  │ │ 1│ 2 │ 02  │     │ 1│ 12│ 12  │
+        │ 2│ 3 │ 03  │ │ 2│ 3 │ 03  │     │ 2│ 13│ 13  │
+        │ 3│ 4 │ 04  │ │ 3│ 4 │ 04  │     │ 3│*14│ 14  │
+        │ 4│ 5 │ 55  │ │ 4│ 5 │ 55  │     └──┴───┴─────┘
+        │ 5│ 6 │ 06  │ │ 5│ 6 │ 06  │
+        │ 6│ 7 │ 07  │ │ 6│ 7 │ 07  │
+        │ 7│ 8 │ 08  │ │ 7│ 8 │ 08  │
+        │ 8│ 9 │ 09  │ │ 8│ 9 │ 09  │
+        │ 9│ 10│ 10  │ │ 9│ 10│ 10  │
+        │10│ 11│ 11  │ │10│ 11│ 11  │
+        │11│ 12│ 12  │ │11│ 12│ 12  │
+        │12│ 13│ 13  │ │12│ 13│ 13  │
+        │13│ 14│ 14  │ │13│*14│ 14  │
+        │14│ 15│ 15  │ │14│ 15│ 15  │
+        └──┴───┴─────┘ └──┴───┴─────┘
+        ");
+
+        // Same as above, but now with scrolloff = 1; the new cursor position obeys scrolloff.
+        let mut viewer = init(text, 3, 15, 1);
+        let output = run(
+            &mut viewer,
+            vec![vec![
+                move_cursor_down(13),
+                resize(Dimensions {
+                    width: 3,
+                    height: 4,
+                }),
+            ]],
+        );
+        assert_snapshot!(output, @r"
+                       MoveCursorDown(13)
+                       Resize({ width: 3, height: 4 })
+        ┌SI┬─L#┬─────┐ ┌SI┬─L#┬─────┐
+        │ 0│*1 │ 01  │ │ 0│ 12│ 12  │
+        │ 1│ 2 │ 02  │ │ 1│ 13│ 13  │
+        │ 2│ 3 │ 03  │ │ 2│*14│ 14  │
+        │ 3│ 4 │ 04  │ │ 3│ 15│ 15  │
+        │ 4│ 5 │ 55  │ └──┴───┴─────┘
         │ 5│ 6 │ 06  │
         │ 6│ 7 │ 07  │
         │ 7│ 8 │ 08  │
@@ -1488,65 +1496,34 @@ mod test {
         │10│ 11│ 11  │
         │11│ 12│ 12  │
         │12│ 13│ 13  │
-        │13│*14│ 14  │
+        │13│ 14│ 14  │
         │14│ 15│ 15  │
-        └──┴───┴─────┘
-        ");
-
-        let new_dimensions = Dimensions {
-            width: 3,
-            height: 4,
-        };
-        viewer.resize(new_dimensions);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬─────┐
-        │ 0│ 11│ 11  │
-        │ 1│ 12│ 12  │
-        │ 2│ 13│ 13  │
-        │ 3│*14│ 14  │
-        └──┴───┴─────┘
-        ");
-
-        // Same as above, but now with scrolloff = 1; the new cursor position obeys scrolloff.
-        let mut viewer = init(text, 3, 15, 1);
-        viewer.move_cursor_down(13);
-        viewer.resize(new_dimensions);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬─────┐
-        │ 0│ 12│ 12  │
-        │ 1│ 13│ 13  │
-        │ 2│*14│ 14  │
-        │ 3│ 15│ 15  │
         └──┴───┴─────┘
         ");
 
         let text = b"a\nb\nc\nd\nxxxxxxxxxxxxxxxxxxxx\ne\nf\ng\n";
         let mut viewer = init(text, 3, 5, 2);
-        viewer.move_cursor_down(3);
-        viewer.scroll_viewport_down(2);
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬─────┐
-        │ 0│ 4 │ d   │
-        │ 1│*5 │ xxx↩│
-        │ 2│*5 │↪xxx↩│
-        │ 3│*5 │↪xxx↩│
-        │ 4│*5 │↪xxx↩│
-        └──┴───┴─────┘
-        ");
-
-        // Anchor point is second line, but snaps into viewport.
-        viewer.resize(Dimensions {
-            width: 30,
-            height: 5,
-        });
-        assert_snapshot!(viewer.render(), @r"
-        ┌SI┬─L#┬────────────────────────────────┐
-        │ 0│ 3 │ c                              │
-        │ 1│ 4 │ d                              │
-        │ 2│*5 │ xxxxxxxxxxxxxxxxxxxx           │
-        │ 3│ 6 │ e                              │
-        │ 4│ 7 │ f                              │
-        └──┴───┴────────────────────────────────┘
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![move_cursor_down(3), scroll_viewport_down(2)],
+                // Anchor point is second line, but snaps into viewport.
+                vec![resize(Dimensions {
+                    width: 30,
+                    height: 5,
+                })],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                       MoveCursorDown(3)     Resize({ width: 30, height: 5 })
+                       ScrollViewportDown(2)
+        ┌SI┬─L#┬─────┐ ┌SI┬─L#┬─────┐        ┌SI┬─L#┬────────────────────────────────┐
+        │ 0│*1 │ a   │ │ 0│ 4 │ d   │        │ 0│ 3 │ c                              │
+        │ 1│ 2 │ b   │ │ 1│*5 │ xxx↩│        │ 1│ 4 │ d                              │
+        │ 2│ 3 │ c   │ │ 2│*5 │↪xxx↩│        │ 2│*5 │ xxxxxxxxxxxxxxxxxxxx           │
+        │ 3│ 4 │ d   │ │ 3│*5 │↪xxx↩│        │ 3│ 6 │ e                              │
+        │ 4│ 5 │ xxx↩│ │ 4│*5 │↪xxx↩│        │ 4│ 7 │ f                              │
+        └──┴───┴─────┘ └──┴───┴─────┘        └──┴───┴────────────────────────────────┘
         ");
     }
 }
