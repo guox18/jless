@@ -29,6 +29,8 @@ pub struct DocumentViewer<D: Document> {
     //
     // Access the functional value via .effective_scrolloff().
     scrolloff_setting: usize,
+
+    tailing_end_of_document: bool,
 }
 
 #[derive(Debug)]
@@ -74,6 +76,7 @@ impl<D: Document> DocumentViewer<D> {
             current_focus: initial_cursor,
             dimensions,
             scrolloff_setting: scrolloff,
+            tailing_end_of_document: true,
         }
     }
 
@@ -713,9 +716,15 @@ impl<D: Document> DocumentViewer<D> {
 
     pub fn append_document_data(&mut self, data: &[u8]) {
         self.doc.append(data);
+
+        if self.tailing_end_of_document {
+            self.focus_bottom();
+        }
     }
 
     pub fn do_action(&mut self, action: Action) {
+        let prev_cursor = self.current_focus.clone();
+
         match action {
             Action::NoOp => (),
             Action::MoveCursorDown(n) => self.move_cursor_down(n),
@@ -724,6 +733,14 @@ impl<D: Document> DocumentViewer<D> {
             Action::ScrollViewportUp(n) => self.scroll_viewport_up(n),
             Action::FocusTop => self.focus_top(),
             Action::FocusBottom => self.focus_bottom(),
+        }
+
+        // When we focus the bottom of the document, we'll start tailing the
+        // end, and we stop when we move the cursor.
+        if matches!(action, Action::FocusBottom) {
+            self.tailing_end_of_document = true;
+        } else if prev_cursor != self.current_focus {
+            self.tailing_end_of_document = false;
         }
     }
 
@@ -782,20 +799,19 @@ mod test {
     ) -> DocumentViewer<TextDocument> {
         let mut doc = TextDocument::new(width);
         doc.append(contents);
-        doc.eof();
 
         let (top_line, initial_cursor) = doc.top_screen_line_and_cursor().unwrap();
         let dimensions = Dimensions { width, height };
         DocumentViewer::new(doc, top_line, initial_cursor, dimensions, scrolloff)
     }
 
-    #[derive(Copy, Clone)]
+    #[derive(Clone)]
     enum Change {
         Action(Action),
         ResizeWidth(usize),
         ResizeHeight(usize),
         Resize(Dimensions),
-        // AppendDocumentData(&'a [u8]),
+        AppendDocumentData(Vec<u8>),
         // DocumentEof,
     }
 
@@ -808,6 +824,7 @@ mod test {
                 Change::Resize(Dimensions { width, height }) => {
                     write!(f, "Resize({{ width: {}, height: {} }})", width, height)
                 }
+                Change::AppendDocumentData(_) => write!(f, "AppendDocData"),
             }
         }
     }
@@ -846,6 +863,10 @@ mod test {
 
     fn resize(dimensions: Dimensions) -> Change {
         Change::Resize(dimensions)
+    }
+
+    fn append_document_data(data: &[u8]) -> Change {
+        Change::AppendDocumentData(data.to_vec())
     }
 
     impl<D: Document> DocumentViewer<D> {
@@ -890,6 +911,7 @@ mod test {
                 Change::ResizeWidth(width) => self.resize_width(width),
                 Change::ResizeHeight(height) => self.resize_height(height),
                 Change::Resize(dimensions) => self.resize(dimensions),
+                Change::AppendDocumentData(data) => self.append_document_data(&data),
             }
         }
     }
@@ -909,10 +931,10 @@ mod test {
             .collect();
 
         let renders: Vec<String> = changes
-            .iter()
+            .into_iter()
             .map(|changes| {
-                for change in changes.iter() {
-                    viewer.do_change(*change);
+                for change in changes.into_iter() {
+                    viewer.do_change(change);
                 }
                 viewer.render()
             })
@@ -1259,6 +1281,31 @@ mod test {
         │ 3│ 4 │ d  │ │ 3│*6 │ ff↩│ │ 3│ 6 │↪ff │         │ 3│*6 │↪ff │ │ 3│ 4 │ d  │
         │ 4│ 5 │ e  │ │ 4│*6 │↪ff │ │ 4│ ~ │    │         │ 4│ ~ │    │ │ 4│ 5 │ e  │
         └──┴───┴────┘ └──┴───┴────┘ └──┴───┴────┘         └──┴───┴────┘ └──┴───┴────┘
+        ");
+    }
+
+    #[test]
+    fn tail_end_of_document_after_focus_bottom() {
+        let mut viewer = init(b"a\nb\n", 3, 4, 0);
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![focus_bottom()],
+                vec![append_document_data(b"c\n")],
+                vec![append_document_data(b"d\ne\n")],
+                vec![move_cursor_up(1), scroll_viewport_down(2)],
+                vec![append_document_data(b"f\ne\n")],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                       FocusBottom    AppendDocData  AppendDocData  MoveCursorUp(1)       AppendDocData
+                                                                    ScrollViewportDown(2)
+        ┌SI┬─L#┬─────┐ ┌SI┬─L#┬─────┐ ┌SI┬─L#┬─────┐ ┌SI┬─L#┬─────┐ ┌SI┬─L#┬─────┐        ┌SI┬─L#┬─────┐
+        │ 0│*1 │ a   │ │ 0│ 1 │ a   │ │ 0│ 1 │ a   │ │ 0│ 2 │ b   │ │ 0│*4 │ d   │        │ 0│*4 │ d   │
+        │ 1│ 2 │ b   │ │ 1│*2 │ b   │ │ 1│ 2 │ b   │ │ 1│ 3 │ c   │ │ 1│ 5 │ e   │        │ 1│ 5 │ e   │
+        │ 2│ ~ │     │ │ 2│ ~ │     │ │ 2│*3 │ c   │ │ 2│ 4 │ d   │ │ 2│ ~ │     │        │ 2│ 6 │ f   │
+        │ 3│ ~ │     │ │ 3│ ~ │     │ │ 3│ ~ │     │ │ 3│*5 │ e   │ │ 3│ ~ │     │        │ 3│ 7 │ e   │
+        └──┴───┴─────┘ └──┴───┴─────┘ └──┴───┴─────┘ └──┴───┴─────┘ └──┴───┴─────┘        └──┴───┴─────┘
         ");
     }
 

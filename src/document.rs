@@ -11,7 +11,7 @@ pub trait Document {
     // `Ord` implementation for `ScreenLine` may panic if we accidentally compare
     // values before/after a resize.
     type ScreenLine: Clone + Eq + Ord + std::fmt::Debug;
-    type Cursor: Ord + std::fmt::Debug;
+    type Cursor: Clone + Ord + std::fmt::Debug;
 
     fn new(width: usize) -> Self;
     fn width(&self) -> usize;
