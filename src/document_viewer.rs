@@ -180,6 +180,60 @@ impl<D: Document> DocumentViewer<D> {
         self.current_focus = cursor;
     }
 
+    pub fn move_focused_elem_to_top(&mut self) {
+        let cursor_range = self.doc.cursor_range(&self.current_focus);
+        let scrolloff = self.effective_scrolloff();
+        // If the focused node is multiple lines, put the start at the top of the screen.
+        self.top_line = self.n_screen_lines_before_or_top_of_doc(cursor_range.start, scrolloff);
+    }
+
+    pub fn move_focused_elem_to_center(&mut self) {
+        // We want to put the middle of the focused node, at the middle of the screen.
+        // There are four cases: even/odd viewport height, even/odd cursor height.
+        // In the odd/odd and even/even cases, things fit evenly, but otherwise we need
+        // to bias in one direction. We'll opt towards putting it closer to the top of
+        // the screen.
+        //
+        // Viewport Height | Cursor Height | Occupied Cursor Range | (VH - CH) / 2
+        //         7       |       3       |    [--xxx--]  (2-4)   | (7 - 3) / 2 = 2
+        //         7       |       4       |    [-xxxx--]  (1-4)   | (7 - 4) / 2 = 1
+        //         8       |       3       |    [--xxx---] (2-4)   | (8 - 3) / 2 = 2
+        //         8       |       4       |    [--xxxx--] (2-5)   | (8 - 4) / 2 = 2
+        //
+        // Cursor is *larger* than viewport. In this case, we want to show more of the
+        // start of the cursor than the end:
+        //         4       |       8       |  xx[xxxx]xx  (-2 - 5) | (4 - 8) / 2 = -2
+        //         4       |       7       |  x[xxxx]xx   (-1 - 5) | (4 - 7) / 2 = -1.5
+        //         3       |       8       |  xx[xxx]xxx  (-2 - 5) | (3 - 8) / 2 = -2.5
+        //         3       |       7       |  xx[xxx]xx   (-2 - 4) | (3 - 7) / 2 = -2
+        //
+        // Conveniently, integer division truncates towards zero, giving us a neat formula here.
+
+        let viewport_height = self.dimensions.height as isize;
+        let cursor_range = self.doc.cursor_range(&self.current_focus);
+        let cursor_height = cursor_range.num_screen_lines as isize;
+
+        let offset = (viewport_height - cursor_height) / 2;
+
+        if offset >= 0 {
+            let offset = offset as usize;
+            self.top_line = self.n_screen_lines_before_or_top_of_doc(cursor_range.start, offset);
+        } else {
+            let offset = (-offset) as usize;
+            self.top_line = self.n_screen_lines_after(cursor_range.start, offset);
+        }
+    }
+
+    pub fn move_focused_elem_to_bottom(&mut self) {
+        let cursor_range = self.doc.cursor_range(&self.current_focus);
+        let scrolloff = self.effective_scrolloff();
+        // If `height = 5`, and `scrolloff = 1`, then we want the end to be the fourth line,
+        // so we want to go `3 = height - 1 - scrolloff` lines before.
+        let offset = (self.dimensions.height - 1) - scrolloff;
+        // If the focused node is multiple lines, put the end at the bottom of the screen.
+        self.top_line = self.n_screen_lines_before_or_top_of_doc(cursor_range.end, offset);
+    }
+
     pub fn scroll_viewport_down(&mut self, mut lines: usize) {
         let mut lines_scrolled = 0;
         let mut next_top_line = self.top_line.clone();
@@ -733,6 +787,9 @@ impl<D: Document> DocumentViewer<D> {
             Action::ScrollViewportUp(n) => self.scroll_viewport_up(n),
             Action::FocusTop => self.focus_top(),
             Action::FocusBottom => self.focus_bottom(),
+            Action::MoveFocusedElemToTop => self.move_focused_elem_to_top(),
+            Action::MoveFocusedElemToCenter => self.move_focused_elem_to_center(),
+            Action::MoveFocusedElemToBottom => self.move_focused_elem_to_bottom(),
         }
 
         // When we focus the bottom of the document, we'll start tailing the
@@ -811,6 +868,7 @@ mod test {
         ResizeWidth(usize),
         ResizeHeight(usize),
         Resize(Dimensions),
+        SetScrolloff(usize),
         AppendDocumentData(Vec<u8>),
         // DocumentEof,
     }
@@ -824,6 +882,7 @@ mod test {
                 Change::Resize(Dimensions { width, height }) => {
                     write!(f, "Resize({{ width: {}, height: {} }})", width, height)
                 }
+                Change::SetScrolloff(scrolloff) => write!(f, "SetScrolloff({})", scrolloff),
                 Change::AppendDocumentData(_) => write!(f, "AppendDocData"),
             }
         }
@@ -853,6 +912,18 @@ mod test {
         Change::Action(Action::FocusBottom)
     }
 
+    fn move_focused_elem_to_top() -> Change {
+        Change::Action(Action::MoveFocusedElemToTop)
+    }
+
+    fn move_focused_elem_to_center() -> Change {
+        Change::Action(Action::MoveFocusedElemToCenter)
+    }
+
+    fn move_focused_elem_to_bottom() -> Change {
+        Change::Action(Action::MoveFocusedElemToBottom)
+    }
+
     fn resize_width(width: usize) -> Change {
         Change::ResizeWidth(width)
     }
@@ -863,6 +934,10 @@ mod test {
 
     fn resize(dimensions: Dimensions) -> Change {
         Change::Resize(dimensions)
+    }
+
+    fn set_scrolloff(scrolloff: usize) -> Change {
+        Change::SetScrolloff(scrolloff)
     }
 
     fn append_document_data(data: &[u8]) -> Change {
@@ -911,6 +986,7 @@ mod test {
                 Change::ResizeWidth(width) => self.resize_width(width),
                 Change::ResizeHeight(height) => self.resize_height(height),
                 Change::Resize(dimensions) => self.resize(dimensions),
+                Change::SetScrolloff(scrolloff) => self.set_scrolloff(scrolloff),
                 Change::AppendDocumentData(data) => self.append_document_data(&data),
             }
         }
@@ -1281,6 +1357,121 @@ mod test {
         │ 3│ 4 │ d  │ │ 3│*6 │ ff↩│ │ 3│ 6 │↪ff │         │ 3│*6 │↪ff │ │ 3│ 4 │ d  │
         │ 4│ 5 │ e  │ │ 4│*6 │↪ff │ │ 4│ ~ │    │         │ 4│ ~ │    │ │ 4│ 5 │ e  │
         └──┴───┴────┘ └──┴───┴────┘ └──┴───┴────┘         └──┴───┴────┘ └──┴───┴────┘
+        ");
+    }
+
+    #[test]
+    fn test_move_focused_elem_to_top_and_bottom() {
+        let mut viewer = init(b"a\nb1b2b3\nc1c2c3\nd1d2\n", 2, 5, 0);
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![move_focused_elem_to_bottom()],
+                vec![move_cursor_down(2), move_focused_elem_to_bottom()],
+                vec![move_cursor_down(1), move_focused_elem_to_bottom()],
+                vec![set_scrolloff(1), move_focused_elem_to_bottom()],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                      MoveFocusedElemToBottom MoveCursorDown(2)       MoveCursorDown(1)       SetScrolloff(1)
+                                              MoveFocusedElemToBottom MoveFocusedElemToBottom MoveFocusedElemToBottom
+        ┌SI┬─L#┬────┐ ┌SI┬─L#┬────┐           ┌SI┬─L#┬────┐           ┌SI┬─L#┬────┐           ┌SI┬─L#┬────┐
+        │ 0│*1 │ a  │ │ 0│*1 │ a  │           │ 0│ 2 │↪b2↩│           │ 0│ 3 │ c1↩│           │ 0│ 3 │↪c2↩│
+        │ 1│ 2 │ b1↩│ │ 1│ 2 │ b1↩│           │ 1│ 2 │↪b3 │           │ 1│ 3 │↪c2↩│           │ 1│ 3 │↪c3 │
+        │ 2│ 2 │↪b2↩│ │ 2│ 2 │↪b2↩│           │ 2│*3 │ c1↩│           │ 2│ 3 │↪c3 │           │ 2│*4 │ d1↩│
+        │ 3│ 2 │↪b3 │ │ 3│ 2 │↪b3 │           │ 3│*3 │↪c2↩│           │ 3│*4 │ d1↩│           │ 3│*4 │↪d2 │
+        │ 4│ 3 │ c1↩│ │ 4│ 3 │ c1↩│           │ 4│*3 │↪c3 │           │ 4│*4 │↪d2 │           │ 4│ ~ │    │
+        └──┴───┴────┘ └──┴───┴────┘           └──┴───┴────┘           └──┴───┴────┘           └──┴───┴────┘
+        ");
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![move_focused_elem_to_top()],
+                vec![set_scrolloff(0), move_focused_elem_to_top()],
+                vec![move_cursor_up(1), move_focused_elem_to_top()],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                      MoveFocusedElemToTop SetScrolloff(0)      MoveCursorUp(1)
+                                           MoveFocusedElemToTop MoveFocusedElemToTop
+        ┌SI┬─L#┬────┐ ┌SI┬─L#┬────┐        ┌SI┬─L#┬────┐        ┌SI┬─L#┬────┐
+        │ 0│ 3 │↪c2↩│ │ 0│ 3 │↪c3 │        │ 0│*4 │ d1↩│        │ 0│*3 │ c1↩│
+        │ 1│ 3 │↪c3 │ │ 1│*4 │ d1↩│        │ 1│*4 │↪d2 │        │ 1│*3 │↪c2↩│
+        │ 2│*4 │ d1↩│ │ 2│*4 │↪d2 │        │ 2│ ~ │    │        │ 2│*3 │↪c3 │
+        │ 3│*4 │↪d2 │ │ 3│ ~ │    │        │ 3│ ~ │    │        │ 3│ 4 │ d1↩│
+        │ 4│ ~ │    │ │ 4│ ~ │    │        │ 4│ ~ │    │        │ 4│ 4 │↪d2 │
+        └──┴───┴────┘ └──┴───┴────┘        └──┴───┴────┘        └──┴───┴────┘
+        ");
+    }
+
+    #[test]
+    fn test_move_focused_elem_to_center() {
+        let mut viewer = init(
+            b"a\nb1b2b3\nc1c2c3\nd1d2d3d4\ne1e2e3e4e5e6e7\nf1f2f3f4f5f6f7f8\n",
+            2,
+            7,
+            0,
+        );
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![move_cursor_down(2), move_focused_elem_to_center()],
+                vec![resize_height(8), move_focused_elem_to_center()],
+                vec![move_cursor_down(1), move_focused_elem_to_center()],
+                vec![resize_height(7), move_focused_elem_to_center()],
+            ],
+        );
+        // Viewport Height | Cursor Height | Occupied Cursor Range | (VH - CH) / 2
+        //         7       |       3       |    [--xxx--]  (2-4)   | (7 - 3) / 2 = 2
+        //         7       |       4       |    [-xxxx--]  (1-4)   | (7 - 4) / 2 = 1
+        //         8       |       3       |    [--xxx---] (2-4)   | (8 - 3) / 2 = 2
+        //         8       |       4       |    [--xxxx--] (2-5)   | (8 - 4) / 2 = 2
+        assert_snapshot!(output, @r"
+                      MoveCursorDown(2)       ResizeHeight(8)         MoveCursorDown(1)       ResizeHeight(7)
+                      MoveFocusedElemToCenter MoveFocusedElemToCenter MoveFocusedElemToCenter MoveFocusedElemToCenter
+        ┌SI┬─L#┬────┐ ┌SI┬─L#┬────┐           ┌SI┬─L#┬────┐           ┌SI┬─L#┬────┐           ┌SI┬─L#┬────┐
+        │ 0│*1 │ a  │ │ 0│ 2 │↪b2↩│           │ 0│ 2 │↪b2↩│           │ 0│ 3 │↪c2↩│           │ 0│ 3 │↪c3 │
+        │ 1│ 2 │ b1↩│ │ 1│ 2 │↪b3 │           │ 1│ 2 │↪b3 │           │ 1│ 3 │↪c3 │           │ 1│*4 │ d1↩│
+        │ 2│ 2 │↪b2↩│ │ 2│*3 │ c1↩│           │ 2│*3 │ c1↩│           │ 2│*4 │ d1↩│           │ 2│*4 │↪d2↩│
+        │ 3│ 2 │↪b3 │ │ 3│*3 │↪c2↩│           │ 3│*3 │↪c2↩│           │ 3│*4 │↪d2↩│           │ 3│*4 │↪d3↩│
+        │ 4│ 3 │ c1↩│ │ 4│*3 │↪c3 │           │ 4│*3 │↪c3 │           │ 4│*4 │↪d3↩│           │ 4│*4 │↪d4 │
+        │ 5│ 3 │↪c2↩│ │ 5│ 4 │ d1↩│           │ 5│ 4 │ d1↩│           │ 5│*4 │↪d4 │           │ 5│ 5 │ e1↩│
+        │ 6│ 3 │↪c3 │ │ 6│ 4 │↪d2↩│           │ 6│ 4 │↪d2↩│           │ 6│ 5 │ e1↩│           │ 6│ 5 │↪e2↩│
+        └──┴───┴────┘ └──┴───┴────┘           │ 7│ 4 │↪d3↩│           │ 7│ 5 │↪e2↩│           └──┴───┴────┘
+                                              └──┴───┴────┘           └──┴───┴────┘
+        ");
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![
+                    resize_height(3),
+                    move_cursor_down(1),
+                    move_focused_elem_to_center(),
+                ],
+                vec![resize_height(4), move_focused_elem_to_center()],
+                vec![move_cursor_down(1), move_focused_elem_to_center()],
+                vec![resize_height(3), move_focused_elem_to_center()],
+            ],
+        );
+        // Viewport Height | Cursor Height | Occupied Cursor Range | (VH - CH) / 2
+        //         4       |       8       |  xx[xxxx]xx  (-2 - 5) | (4 - 8) / 2 = -2
+        //         4       |       7       |  x[xxxx]xx   (-1 - 5) | (4 - 7) / 2 = -1.5
+        //         3       |       8       |  xx[xxx]xxx  (-2 - 5) | (3 - 8) / 2 = -2.5
+        //         3       |       7       |  xx[xxx]xx   (-2 - 4) | (3 - 7) / 2 = -2
+        // 7 'e's, 8 'f's
+        assert_snapshot!(output, @r"
+                      ResizeHeight(3)         ResizeHeight(4)         MoveCursorDown(1)       ResizeHeight(3)
+                      MoveCursorDown(1)       MoveFocusedElemToCenter MoveFocusedElemToCenter MoveFocusedElemToCenter
+                      MoveFocusedElemToCenter
+        ┌SI┬─L#┬────┐ ┌SI┬─L#┬────┐           ┌SI┬─L#┬────┐           ┌SI┬─L#┬────┐           ┌SI┬─L#┬────┐
+        │ 0│ 3 │↪c3 │ │ 0│*5 │↪e3↩│           │ 0│*5 │↪e2↩│           │ 0│*6 │↪f3↩│           │ 0│*6 │↪f3↩│
+        │ 1│*4 │ d1↩│ │ 1│*5 │↪e4↩│           │ 1│*5 │↪e3↩│           │ 1│*6 │↪f4↩│           │ 1│*6 │↪f4↩│
+        │ 2│*4 │↪d2↩│ │ 2│*5 │↪e5↩│           │ 2│*5 │↪e4↩│           │ 2│*6 │↪f5↩│           │ 2│*6 │↪f5↩│
+        │ 3│*4 │↪d3↩│ └──┴───┴────┘           │ 3│*5 │↪e5↩│           │ 3│*6 │↪f6↩│           └──┴───┴────┘
+        │ 4│*4 │↪d4 │                         └──┴───┴────┘           └──┴───┴────┘
+        │ 5│ 5 │ e1↩│
+        │ 6│ 5 │↪e2↩│
+        └──┴───┴────┘
         ");
     }
 

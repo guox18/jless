@@ -14,9 +14,17 @@ use crate::terminal::{AnsiTerminal, Terminal};
 pub struct App<D: Document> {
     doc_while_waiting_for_input: Option<D>,
     viewer: Option<DocumentViewer<D>>,
+    input_state: InputState,
     readline_editor: Editor<(), MemHistory>,
     dimensions: Dimensions,
     stdout: Box<dyn std::io::Write>,
+}
+
+// State to determine how to process the next event input.
+#[derive(PartialEq)]
+enum InputState {
+    Default,
+    PendingZCommand,
 }
 
 pub struct Break;
@@ -31,10 +39,83 @@ impl<D: Document> App<D> {
         App {
             doc_while_waiting_for_input: Some(doc),
             viewer: None,
+            input_state: InputState::Default,
             dimensions,
             readline_editor,
             stdout,
         }
+    }
+
+    pub fn handle_tty_event(&mut self, tty_event: TermionEvent) -> Option<Break> {
+        let action = match self.input_state {
+            InputState::PendingZCommand => {
+                self.input_state = InputState::Default;
+                match tty_event {
+                    TermionEvent::Key(Key::Char('t')) => Some(Action::MoveFocusedElemToTop),
+                    TermionEvent::Key(Key::Char('z')) => Some(Action::MoveFocusedElemToCenter),
+                    TermionEvent::Key(Key::Char('b')) => Some(Action::MoveFocusedElemToBottom),
+                    _ => None,
+                }
+            }
+            InputState::Default => match tty_event {
+                TermionEvent::Key(Key::Char('q') | Key::Ctrl('c')) => {
+                    // Immediately return; we are quitting the program.
+                    return Some(Break);
+                }
+                TermionEvent::Key(Key::Char('j')) => Some(Action::MoveCursorDown(1)),
+                TermionEvent::Key(Key::Char('k')) => Some(Action::MoveCursorUp(1)),
+                TermionEvent::Key(Key::Char('g')) => Some(Action::FocusTop),
+                TermionEvent::Key(Key::Char('G')) => Some(Action::FocusBottom),
+                TermionEvent::Key(Key::Ctrl('e')) => Some(Action::ScrollViewportDown(1)),
+                TermionEvent::Key(Key::Ctrl('y')) => Some(Action::ScrollViewportUp(1)),
+                TermionEvent::Key(Key::Char('z')) => {
+                    self.input_state = InputState::PendingZCommand;
+                    None
+                }
+                _ => None,
+            },
+        };
+
+        if let (Some(viewer), Some(action)) = (&mut self.viewer, action) {
+            viewer.do_action(action);
+        }
+
+        self.draw_screen();
+
+        match tty_event {
+            TermionEvent::Key(Key::Char(':')) => {
+                // These [unwrap]s should be handled once this is moved out of
+                // a proof-of-concept phase.
+                write!(self.stdout, "{}", termion::cursor::Show).unwrap();
+                let result = self.readline_editor.readline("Enter command: ");
+                write!(self.stdout, "{}", termion::cursor::Hide).unwrap();
+                print!("\rGot command: {result:?}\r\n");
+                None
+            }
+            _ => None,
+        }
+    }
+
+    // Someday: Do something here.
+    pub fn handle_tty_input_error(&mut self, io_error: io::Error) {
+        eprintln!("TTY Input Error: {io_error:?}");
+    }
+
+    pub fn handle_data_input_error(&mut self, io_error: io::Error) {
+        eprintln!("Data Input Error: {io_error:?}");
+    }
+
+    pub fn handle_window_resize(&mut self, new_dimensions: Dimensions) {
+        self.dimensions = new_dimensions;
+
+        if let Some(doc) = &mut self.doc_while_waiting_for_input {
+            doc.resize(new_dimensions.width);
+        }
+        if let Some(viewer) = &mut self.viewer {
+            viewer.resize(new_dimensions);
+        }
+
+        self.draw_screen();
     }
 
     pub fn handle_document_data(&mut self, data: Option<&[u8]>) {
@@ -64,62 +145,6 @@ impl<D: Document> App<D> {
         }
 
         self.draw_screen();
-    }
-
-    pub fn handle_window_resize(&mut self, new_dimensions: Dimensions) {
-        self.dimensions = new_dimensions;
-
-        if let Some(doc) = &mut self.doc_while_waiting_for_input {
-            doc.resize(new_dimensions.width);
-        }
-        if let Some(viewer) = &mut self.viewer {
-            viewer.resize(new_dimensions);
-        }
-
-        self.draw_screen();
-    }
-
-    pub fn handle_tty_event(&mut self, tty_event: TermionEvent) -> Option<Break> {
-        if let Some(viewer) = &mut self.viewer {
-            let action = match tty_event {
-                TermionEvent::Key(Key::Char('j')) => Some(Action::MoveCursorDown(1)),
-                TermionEvent::Key(Key::Char('k')) => Some(Action::MoveCursorUp(1)),
-                TermionEvent::Key(Key::Char('g')) => Some(Action::FocusTop),
-                TermionEvent::Key(Key::Char('G')) => Some(Action::FocusBottom),
-                TermionEvent::Key(Key::Ctrl('e')) => Some(Action::ScrollViewportDown(1)),
-                TermionEvent::Key(Key::Ctrl('y')) => Some(Action::ScrollViewportUp(1)),
-                _ => None,
-            };
-
-            if let Some(action) = action {
-                viewer.do_action(action);
-            }
-        }
-
-        self.draw_screen();
-
-        match tty_event {
-            TermionEvent::Key(Key::Char('q') | Key::Ctrl('c')) => Some(Break),
-            TermionEvent::Key(Key::Char(':')) => {
-                // These [unwrap]s should be handled once this is moved out of
-                // a proof-of-concept phase.
-                write!(self.stdout, "{}", termion::cursor::Show).unwrap();
-                let result = self.readline_editor.readline("Enter command: ");
-                write!(self.stdout, "{}", termion::cursor::Hide).unwrap();
-                print!("\rGot command: {result:?}\r\n");
-                None
-            }
-            _ => None,
-        }
-    }
-
-    // Someday: Do something here.
-    pub fn handle_tty_input_error(&mut self, io_error: io::Error) {
-        eprintln!("TTY Input Error: {io_error:?}");
-    }
-
-    pub fn handle_data_input_error(&mut self, io_error: io::Error) {
-        eprintln!("Data Input Error: {io_error:?}");
     }
 
     fn draw_screen(&mut self) {

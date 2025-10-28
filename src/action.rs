@@ -12,4 +12,7 @@ pub enum Action {
 
     FocusTop,
     FocusBottom,
+    MoveFocusedElemToCenter,
+    MoveFocusedElemToTop,
+    MoveFocusedElemToBottom,
 }
