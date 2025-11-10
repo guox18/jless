@@ -62,6 +62,21 @@ enum PositionOfScreenLine {
     BelowBottomLine,
 }
 
+#[derive(Debug, Copy, Clone)]
+enum PositionOfCursorInViewport {
+    EntirelyInViewport {
+        start_index: usize,
+        end_index: usize,
+    },
+    StartsAboveViewport {
+        end_index: usize,
+    },
+    EndsBelowViewport {
+        start_index: usize,
+    },
+    StartsAndEndsOutsideViewport,
+}
+
 impl<D: Document> DocumentViewer<D> {
     pub fn new(
         doc: D,
@@ -137,10 +152,54 @@ impl<D: Document> DocumentViewer<D> {
             curr_screen_line = self
                 .doc
                 .next_screen_line(&curr_screen_line)
-                .expect("[screen_line] should exist after top line and before EOF");
+                .expect("`screen_line` should exist after top line and before EOF");
         }
 
         PositionOfScreenLine::BelowBottomLine
+    }
+
+    fn position_of_cursor_in_viewport(
+        &self,
+        cursor_range: &CursorRange<D::ScreenLine>,
+    ) -> PositionOfCursorInViewport {
+        let start_position = self.position_of_screen_line(&cursor_range.start);
+        let end_position = self.position_of_screen_line(&cursor_range.end);
+
+        match (start_position, end_position) {
+            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::AboveTopLine) => {
+                panic!("entirety of cursor is above the viewport");
+            }
+            (
+                PositionOfScreenLine::AboveTopLine,
+                PositionOfScreenLine::AtScreenIndex(end_index),
+            ) => PositionOfCursorInViewport::StartsAboveViewport { end_index },
+            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::BelowBottomLine) => {
+                PositionOfCursorInViewport::StartsAndEndsOutsideViewport
+            }
+            (PositionOfScreenLine::AtScreenIndex(index), PositionOfScreenLine::AboveTopLine) => {
+                panic!("start of cursor is in viewport, but bottom is above the top line");
+            }
+            (
+                PositionOfScreenLine::AtScreenIndex(start_index),
+                PositionOfScreenLine::AtScreenIndex(end_index),
+            ) => PositionOfCursorInViewport::EntirelyInViewport {
+                start_index,
+                end_index,
+            },
+            (
+                PositionOfScreenLine::AtScreenIndex(start_index),
+                PositionOfScreenLine::BelowBottomLine,
+            ) => PositionOfCursorInViewport::EndsBelowViewport { start_index },
+            (PositionOfScreenLine::BelowBottomLine, PositionOfScreenLine::AboveTopLine) => {
+                panic!("end of cursor is below viewport, but start is above viewport");
+            }
+            (PositionOfScreenLine::BelowBottomLine, PositionOfScreenLine::AtScreenIndex(_)) => {
+                panic!("end of cursor is below viewport, but start is in viewport");
+            }
+            (PositionOfScreenLine::BelowBottomLine, PositionOfScreenLine::BelowBottomLine) => {
+                panic!("entirety of cursor is below the viewport");
+            }
+        }
     }
 
     pub fn move_cursor_down(&mut self, lines: usize) {
@@ -559,22 +618,17 @@ impl<D: Document> DocumentViewer<D> {
         };
 
         let old_cursor_range = self.doc.cursor_range(&self.current_focus);
-        let start_position = self.position_of_screen_line(&old_cursor_range.start);
-        let end_position = self.position_of_screen_line(&old_cursor_range.end);
 
-        match (start_position, end_position) {
-            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::AboveTopLine) => {
-                panic!("entirety of focused node is before the start of the screen");
-            }
-            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::AtScreenIndex(index)) => {
+        match self.position_of_cursor_in_viewport(&old_cursor_range) {
+            PositionOfCursorInViewport::StartsAboveViewport { end_index } => {
                 // Don't top line to keep anchored, so we'll keep the end of the line
                 // in the same place.
                 self.update_dimensions_and_resize_doc(new_dimensions);
                 let new_cursor_range = self.doc.cursor_range(&self.current_focus);
                 self.top_line =
-                    self.n_screen_lines_before_or_top_of_doc(new_cursor_range.end, index);
+                    self.n_screen_lines_before_or_top_of_doc(new_cursor_range.end, end_index);
             }
-            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::BelowBottomLine) => {
+            PositionOfCursorInViewport::StartsAndEndsOutsideViewport => {
                 let lines_above_top_of_screen = self
                     .doc
                     .diff_screen_lines(&self.top_line, &old_cursor_range.start);
@@ -620,14 +674,12 @@ impl<D: Document> DocumentViewer<D> {
                     );
                 }
             }
-            (PositionOfScreenLine::AtScreenIndex(index), _) => {
+            PositionOfCursorInViewport::EntirelyInViewport { start_index, .. }
+            | PositionOfCursorInViewport::EndsBelowViewport { start_index } => {
                 self.update_dimensions_and_resize_doc(new_dimensions);
                 let new_cursor_range = self.doc.cursor_range(&self.current_focus);
                 self.top_line =
-                    self.n_screen_lines_before_or_top_of_doc(new_cursor_range.start, index);
-            }
-            (PositionOfScreenLine::BelowBottomLine, _) => {
-                panic!("entirety of focused node is past the end of the screen");
+                    self.n_screen_lines_before_or_top_of_doc(new_cursor_range.start, start_index);
             }
         }
     }
@@ -652,43 +704,32 @@ impl<D: Document> DocumentViewer<D> {
         };
 
         let cursor_range = self.doc.cursor_range(&self.current_focus);
-        let start_position = self.position_of_screen_line(&cursor_range.start);
-        let end_position = self.position_of_screen_line(&cursor_range.end);
 
-        match (start_position, end_position) {
-            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::AboveTopLine) => {
-                panic!("entirety of focused node is before the start of the screen");
-            }
-            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::AtScreenIndex(index)) => {
+        match self.position_of_cursor_in_viewport(&cursor_range) {
+            PositionOfCursorInViewport::StartsAboveViewport { end_index } => {
                 // Keep the end of focused node in the same percentile
                 anchor_screen_line = cursor_range.end;
-                new_index = convert_old_index_to_new_index(index);
+                new_index = convert_old_index_to_new_index(end_index);
             }
-            (PositionOfScreenLine::AboveTopLine, PositionOfScreenLine::BelowBottomLine) => {
+            PositionOfCursorInViewport::StartsAndEndsOutsideViewport => {
                 // Keep middle of what's visible on screen in the middle.
                 let half_old_height = self.dimensions.height / 2;
                 anchor_screen_line = self.screen_line_at_screen_index(half_old_height).unwrap();
                 new_index = new_height / 2;
             }
-            (PositionOfScreenLine::AtScreenIndex(index), PositionOfScreenLine::AboveTopLine) => {
-                panic!("start of focused node is on screen, but bottom is above the top line");
-            }
-            (
-                PositionOfScreenLine::AtScreenIndex(start_index),
-                PositionOfScreenLine::AtScreenIndex(end_index),
-            ) => {
+            PositionOfCursorInViewport::EntirelyInViewport {
+                start_index,
+                end_index,
+            } => {
                 // Keep the middle of focused node in the same percentile.
                 let middle_index = (start_index + end_index) / 2;
                 anchor_screen_line = self.screen_line_at_screen_index(middle_index).unwrap();
                 new_index = convert_old_index_to_new_index(middle_index);
             }
-            (PositionOfScreenLine::AtScreenIndex(index), PositionOfScreenLine::BelowBottomLine) => {
+            PositionOfCursorInViewport::EndsBelowViewport { start_index } => {
                 // Keep the start of focused node in the same percentile.
                 anchor_screen_line = cursor_range.start;
-                new_index = convert_old_index_to_new_index(index);
-            }
-            (PositionOfScreenLine::BelowBottomLine, _) => {
-                panic!("entirety of focused node is past the end of the screen");
+                new_index = convert_old_index_to_new_index(start_index);
             }
         }
 
