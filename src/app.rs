@@ -68,6 +68,8 @@ impl<D: Document> App<D> {
                 TermionEvent::Key(Key::Char('G')) => Some(Action::FocusBottom),
                 TermionEvent::Key(Key::Ctrl('e')) => Some(Action::ScrollViewportDown(1)),
                 TermionEvent::Key(Key::Ctrl('y')) => Some(Action::ScrollViewportUp(1)),
+                TermionEvent::Key(Key::Ctrl('d')) => Some(Action::JumpDown(None)),
+                TermionEvent::Key(Key::Ctrl('u')) => Some(Action::JumpUp(None)),
                 TermionEvent::Key(Key::Char('z')) => {
                     self.input_state = InputState::PendingZCommand;
                     None

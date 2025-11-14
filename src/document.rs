@@ -101,7 +101,7 @@ pub trait Document {
         }
     }
 
-    // If a `Document` supports multiple focused lines within a single `ScreenLine`, then it
+    // If a `Document` supports multiple focused nodes within a single `ScreenLine`, then it
     // should return a new cursor with similar horizontal positioning as `prev_cursor`.
     fn convert_screen_line_to_cursor(
         &self,

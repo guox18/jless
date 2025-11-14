@@ -1,4 +1,5 @@
 use std::cmp;
+use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 
 use crate::action::Action;
@@ -31,6 +32,7 @@ pub struct DocumentViewer<D: Document> {
     scrolloff_setting: usize,
 
     tailing_end_of_document: bool,
+    jump_distance: Option<NonZeroUsize>,
 }
 
 #[derive(Debug)]
@@ -92,6 +94,7 @@ impl<D: Document> DocumentViewer<D> {
             dimensions,
             scrolloff_setting: scrolloff,
             tailing_end_of_document: true,
+            jump_distance: None,
         }
     }
 
@@ -120,6 +123,22 @@ impl<D: Document> DocumentViewer<D> {
             screen_index -= 1;
         }
         Some(curr_line)
+    }
+
+    // Moves the focus to the node that appears at the given screen index.
+    fn move_focus_to_screen_index_or_eof(&mut self, screen_index: usize) {
+        self.current_focus = match self.screen_line_at_screen_index(screen_index) {
+            None => self
+                .doc
+                .bottom_screen_line_and_cursor()
+                .expect(
+                    "bottom_screen_line_and_cursor to be Some if we've created a DocumentViewer",
+                )
+                .1,
+            Some(screen_line_at_index) => self
+                .doc
+                .convert_screen_line_to_cursor(screen_line_at_index, &self.current_focus),
+        }
     }
 
     // If the last line of the file appears before `screen_index`, this will return the
@@ -331,6 +350,137 @@ impl<D: Document> DocumentViewer<D> {
             self.top_line = next_top_line;
             self.maybe_update_focused_node_after_scroll();
         }
+    }
+
+    fn jump_down(&mut self, num_screen_lines: Option<NonZeroUsize>) {
+        let focused_range = self.doc.cursor_range(&self.current_focus);
+
+        // It maybe feels a little weird to use the start/end index when something
+        // is half on the screen, as opposed to something more "principled" like
+        // start/2, but the user isn't trying to jump to a specific element, so
+        // it doesn't really matter.
+        //
+        // Using the start/end index might also mean there will be a tiny bit less visual jitter.
+        let focus_index = match self.position_of_cursor_in_viewport(&focused_range) {
+            PositionOfCursorInViewport::StartsAboveViewport { end_index } => end_index,
+            PositionOfCursorInViewport::EndsBelowViewport { start_index } => start_index,
+            PositionOfCursorInViewport::StartsAndEndsOutsideViewport => self.dimensions.height / 2,
+            PositionOfCursorInViewport::EntirelyInViewport { end_index, .. } => end_index,
+        };
+
+        let lines_to_move =
+            self.calculate_and_maybe_save_num_screen_lines_to_jump(num_screen_lines);
+
+        let last_screen_line = self.screen_line_at_screen_index(self.dimensions.height - 1);
+
+        // If the last screen line of the doc is visible on screen, we don't move the viewport.
+        // The last screen line is visible if there's no screen line at the bottom of the viewport,
+        // or if nothing comes after the screen line at the bottom of the viewport.
+        let screen_line_at_bottom_of_viewport_thats_not_last_line_in_doc = match last_screen_line {
+            None => None,
+            Some(last_screen_line) => {
+                if self.doc.next_screen_line(&last_screen_line).is_some() {
+                    Some(last_screen_line)
+                } else {
+                    None
+                }
+            }
+        };
+
+        match screen_line_at_bottom_of_viewport_thats_not_last_line_in_doc {
+            Some(last_screen_line) => {
+                // If this exists, that means we're not at the end of the doc, so we need to
+                // update the viewport.
+
+                // Count past the last screen line, but not past the bottom of the doc, then
+                // rewind to find the new top line.
+                let new_last_screen_line = self
+                    .n_screen_lines_after_or_bottom_of_doc(last_screen_line, lines_to_move.get());
+                self.top_line = self.n_screen_lines_before_or_top_of_doc(
+                    new_last_screen_line,
+                    self.dimensions.height - 1,
+                );
+                // Keep focus in the same place on screen.
+                self.move_focus_to_screen_index_or_eof(focus_index);
+            }
+            None => {
+                // If we didn't move the viewport, we'll move the current focus by the desired
+                // number of screen lines. Importantly, we need to make sure that we actually
+                // make some progress even if the focused node is multipled lines tall.
+
+                // Cap `focus_index` at the last index visible on screen.
+                let focus_index = cmp::min(
+                    focus_index + lines_to_move.get(),
+                    self.dimensions.height - 1,
+                );
+                self.move_focus_to_screen_index_or_eof(focus_index);
+            }
+        }
+    }
+
+    fn jump_up(&mut self, num_screen_lines: Option<NonZeroUsize>) {
+        let focused_range = self.doc.cursor_range(&self.current_focus);
+
+        // Note that we pick the `start_index` in the `EntirelyInViewport` case. (See comment
+        // below.)
+        let focus_index = match self.position_of_cursor_in_viewport(&focused_range) {
+            PositionOfCursorInViewport::StartsAboveViewport { end_index } => end_index,
+            PositionOfCursorInViewport::EndsBelowViewport { start_index } => start_index,
+            PositionOfCursorInViewport::StartsAndEndsOutsideViewport => self.dimensions.height / 2,
+            PositionOfCursorInViewport::EntirelyInViewport { start_index, .. } => start_index,
+        };
+
+        let lines_to_move = self
+            .calculate_and_maybe_save_num_screen_lines_to_jump(num_screen_lines)
+            .get();
+        let mut lines_moved = 0;
+        let mut next_top_line = self.top_line.clone();
+
+        while lines_moved < lines_to_move {
+            match self.doc.prev_screen_line(&next_top_line) {
+                None => break,
+                Some(line) => {
+                    lines_moved += 1;
+                    next_top_line = line;
+                }
+            }
+        }
+
+        self.top_line = next_top_line;
+
+        if lines_moved == 0 {
+            // We're at the top of the screen, move current focus by desired number of screen lines.
+            //
+            // Importantly, we need to make sure that this actually moves the focus in the case
+            // where the focused line is multiple lines tall. If we're already at the top of the
+            // file, the only possibilities for the position of the cursor are `EndsBelowViewport`
+            // and `EntirelyInViewport`, and in both cases we pick the `start_index` as the focus
+            // index, so anything before that will be a different node.
+            let focus_index = focus_index.saturating_sub(lines_to_move);
+            self.move_focus_to_screen_index_or_eof(focus_index);
+        } else {
+            // The screen moved, so keep the focus in the same place on screen.
+            self.move_focus_to_screen_index_or_eof(focus_index);
+        }
+    }
+
+    fn calculate_and_maybe_save_num_screen_lines_to_jump(
+        &mut self,
+        num_screen_lines: Option<NonZeroUsize>,
+    ) -> NonZeroUsize {
+        // If we have a value, save it for next time, and return it.
+        if let Some(n) = num_screen_lines {
+            self.jump_distance = Some(n);
+            return n;
+        }
+
+        // If we don't have a value, use a previous one if we had it.
+        if let Some(n) = self.jump_distance {
+            return n;
+        }
+
+        // Otherwise use half the height of the screen (but at least 1).
+        NonZeroUsize::new(cmp::max(self.dimensions.height / 2, 1)).unwrap()
     }
 
     fn update_so_new_cursor_is_visible(&mut self, new_cursor: Option<D::Cursor>) {
@@ -690,6 +840,9 @@ impl<D: Document> DocumentViewer<D> {
             return;
         }
 
+        // This gets reset when the size of the viewport changes.
+        self.jump_distance = None;
+
         // We'll go with vim's approach of keeping the focused in the same percentile of the
         // screen.
 
@@ -805,6 +958,21 @@ impl<D: Document> DocumentViewer<D> {
         screen_line
     }
 
+    fn n_screen_lines_after_or_bottom_of_doc(
+        &self,
+        mut screen_line: D::ScreenLine,
+        mut n: usize,
+    ) -> D::ScreenLine {
+        while n > 0 {
+            let Some(next_screen_line) = self.doc.next_screen_line(&screen_line) else {
+                return screen_line;
+            };
+            screen_line = next_screen_line;
+            n -= 1;
+        }
+        screen_line
+    }
+
     pub fn document_eof(&mut self) {
         self.doc.eof();
     }
@@ -826,6 +994,8 @@ impl<D: Document> DocumentViewer<D> {
             Action::MoveCursorUp(n) => self.move_cursor_up(n),
             Action::ScrollViewportDown(n) => self.scroll_viewport_down(n),
             Action::ScrollViewportUp(n) => self.scroll_viewport_up(n),
+            Action::JumpDown(n) => self.jump_down(n),
+            Action::JumpUp(n) => self.jump_up(n),
             Action::FocusTop => self.focus_top(),
             Action::FocusBottom => self.focus_bottom(),
             Action::MoveFocusedElemToTop => self.move_focused_elem_to_top(),
@@ -943,6 +1113,16 @@ mod test {
 
     fn scroll_viewport_up(n: usize) -> Change {
         Change::Action(Action::ScrollViewportUp(n))
+    }
+
+    fn jump_down(n: Option<usize>) -> Change {
+        let n = n.map(NonZeroUsize::new).flatten();
+        Change::Action(Action::JumpDown(n))
+    }
+
+    fn jump_up(n: Option<usize>) -> Change {
+        let n = n.map(NonZeroUsize::new).flatten();
+        Change::Action(Action::JumpUp(n))
     }
 
     fn focus_top() -> Change {
@@ -1371,6 +1551,84 @@ mod test {
         │ 2│ 5 │ e  │ │ 2│*3 │↪c8 │       │ 2│*3 │ c1↩│
         │ 3│ ~ │    │ │ 3│ 4 │ d  │       │ 3│*3 │↪c2↩│
         └──┴───┴────┘ └──┴───┴────┘       └──┴───┴────┘
+        ");
+    }
+
+    #[test]
+    fn test_jump_up_and_down() {
+        let mut viewer = init(b"a\nbb\nc\nddd\ne\nff\ng\nhhh\ni\nj\nk\nl\n", 1, 6, 0);
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![move_cursor_down(2), scroll_viewport_down(1)],
+                vec![jump_down(None)],    // Jump by half screen height (3)
+                vec![jump_down(Some(2))], // Jump by 2
+                vec![jump_down(None)],    // Still jump by 2
+                vec![jump_up(None)],      // Still jump by 2
+                vec![resize_height(7), resize_height(6), jump_down(None)], // After resize, resets to 3
+            ],
+        );
+        assert_snapshot!(output, @r"
+                     MoveCursorDown(2)     JumpDown(None) JumpDown(Some(2)) JumpDown(None) JumpUp(None) ResizeHeight(7)
+                     ScrollViewportDown(1)                                                              ResizeHeight(6)
+                                                                                                        JumpDown(None)
+        ┌SI┬─L#┬───┐ ┌SI┬─L#┬───┐          ┌SI┬─L#┬───┐   ┌SI┬─L#┬───┐      ┌SI┬─L#┬───┐   ┌SI┬─L#┬───┐ ┌SI┬─L#┬───┐
+        │ 0│*1 │ a │ │ 0│ 2 │ b↩│          │ 0│*4 │ d↩│   │ 0│ 4 │↪d │      │ 0│ 6 │ f↩│   │ 0│ 4 │↪d │ │ 0│ 6 │↪f │
+        │ 1│ 2 │ b↩│ │ 1│ 2 │↪b │          │ 1│*4 │↪d↩│   │ 1│ 5 │ e │      │ 1│ 6 │↪f │   │ 1│ 5 │ e │ │ 1│ 7 │ g │
+        │ 2│ 2 │↪b │ │ 2│*3 │ c │          │ 2│*4 │↪d │   │ 2│*6 │ f↩│      │ 2│ 7 │ g │   │ 2│*6 │ f↩│ │ 2│*8 │ h↩│
+        │ 3│ 3 │ c │ │ 3│ 4 │ d↩│          │ 3│ 5 │ e │   │ 3│*6 │↪f │      │ 3│*8 │ h↩│   │ 3│*6 │↪f │ │ 3│*8 │↪h↩│
+        │ 4│ 4 │ d↩│ │ 4│ 4 │↪d↩│          │ 4│ 6 │ f↩│   │ 4│ 7 │ g │      │ 4│*8 │↪h↩│   │ 4│ 7 │ g │ │ 4│*8 │↪h │
+        │ 5│ 4 │↪d↩│ │ 5│ 4 │↪d │          │ 5│ 6 │↪f │   │ 5│ 8 │ h↩│      │ 5│*8 │↪h │   │ 5│ 8 │ h↩│ │ 5│ 9 │ i │
+        └──┴───┴───┘ └──┴───┴───┘          └──┴───┴───┘   └──┴───┴───┘      └──┴───┴───┘   └──┴───┴───┘ └──┴───┴───┘
+        ");
+        viewer.do_action(Action::FocusBottom);
+        viewer.do_action(Action::ScrollViewportUp(1));
+        viewer.do_action(Action::MoveCursorUp(2));
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![jump_down(Some(5))],
+                vec![jump_down(None)],
+                vec![move_cursor_up(3), scroll_viewport_down(1)],
+                vec![jump_down(Some(2))],
+                vec![jump_down(None)],
+                vec![jump_up(None)],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                     JumpDown(Some(5)) JumpDown(None) MoveCursorUp(3)       JumpDown(Some(2)) JumpDown(None) JumpUp(None)
+                                                      ScrollViewportDown(1)
+        ┌SI┬─L#┬───┐ ┌SI┬─L#┬───┐      ┌SI┬─L#┬───┐   ┌SI┬─L#┬───┐          ┌SI┬─L#┬───┐      ┌SI┬─L#┬───┐   ┌SI┬─L#┬───┐
+        │ 0│ 8 │ h↩│ │ 0│ 8 │↪h↩│      │ 0│ 8 │↪h↩│   │ 0│ 8 │↪h │          │ 0│ 8 │↪h │      │ 0│ 8 │↪h │   │ 0│ 8 │ h↩│
+        │ 1│ 8 │↪h↩│ │ 1│ 8 │↪h │      │ 1│ 8 │↪h │   │ 1│*9 │ i │          │ 1│ 9 │ i │      │ 1│ 9 │ i │   │ 1│ 8 │↪h↩│
+        │ 2│ 8 │↪h │ │ 2│ 9 │ i │      │ 2│ 9 │ i │   │ 2│ 10│ j │          │ 2│ 10│ j │      │ 2│ 10│ j │   │ 2│ 8 │↪h │
+        │ 3│*9 │ i │ │ 3│*10│ j │      │ 3│ 10│ j │   │ 3│ 11│ k │          │ 3│*11│ k │      │ 3│ 11│ k │   │ 3│ 9 │ i │
+        │ 4│ 10│ j │ │ 4│ 11│ k │      │ 4│ 11│ k │   │ 4│ 12│ l │          │ 4│ 12│ l │      │ 4│*12│ l │   │ 4│*10│ j │
+        │ 5│ 11│ k │ │ 5│ 12│ l │      │ 5│*12│ l │   │ 5│ ~ │   │          │ 5│ ~ │   │      │ 5│ ~ │   │   │ 5│ 11│ k │
+        └──┴───┴───┘ └──┴───┴───┘      └──┴───┴───┘   └──┴───┴───┘          └──┴───┴───┘      └──┴───┴───┘   └──┴───┴───┘
+        ");
+        viewer.do_action(Action::FocusTop);
+        viewer.do_action(Action::ScrollViewportDown(1));
+        viewer.do_action(Action::MoveCursorDown(2));
+        let output = run(
+            &mut viewer,
+            vec![
+                vec![jump_up(Some(2))],
+                vec![jump_up(None)],
+                vec![jump_up(None)],
+                vec![jump_up(None)],
+            ],
+        );
+        assert_snapshot!(output, @r"
+                     JumpUp(Some(2)) JumpUp(None) JumpUp(None) JumpUp(None)
+        ┌SI┬─L#┬───┐ ┌SI┬─L#┬───┐    ┌SI┬─L#┬───┐ ┌SI┬─L#┬───┐ ┌SI┬─L#┬───┐
+        │ 0│ 2 │ b↩│ │ 0│ 1 │ a │    │ 0│ 1 │ a │ │ 0│*1 │ a │ │ 0│*1 │ a │
+        │ 1│ 2 │↪b │ │ 1│ 2 │ b↩│    │ 1│*2 │ b↩│ │ 1│ 2 │ b↩│ │ 1│ 2 │ b↩│
+        │ 2│ 3 │ c │ │ 2│ 2 │↪b │    │ 2│*2 │↪b │ │ 2│ 2 │↪b │ │ 2│ 2 │↪b │
+        │ 3│*4 │ d↩│ │ 3│*3 │ c │    │ 3│ 3 │ c │ │ 3│ 3 │ c │ │ 3│ 3 │ c │
+        │ 4│*4 │↪d↩│ │ 4│ 4 │ d↩│    │ 4│ 4 │ d↩│ │ 4│ 4 │ d↩│ │ 4│ 4 │ d↩│
+        │ 5│*4 │↪d │ │ 5│ 4 │↪d↩│    │ 5│ 4 │↪d↩│ │ 5│ 4 │↪d↩│ │ 5│ 4 │↪d↩│
+        └──┴───┴───┘ └──┴───┴───┘    └──┴───┴───┘ └──┴───┴───┘ └──┴───┴───┘
         ");
     }
 
