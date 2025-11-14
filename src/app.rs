@@ -1,5 +1,6 @@
 use std::fmt::Write;
 use std::io;
+use std::num::NonZeroUsize;
 
 use rustyline::history::MemHistory;
 use rustyline::Editor;
@@ -11,10 +12,15 @@ use crate::document::Document;
 use crate::document_viewer::DocumentViewer;
 use crate::terminal::{AnsiTerminal, Terminal};
 
+const MAX_BUFFER_SIZE: usize = 9;
+
 pub struct App<D: Document> {
     doc_while_waiting_for_input: Option<D>,
     viewer: Option<DocumentViewer<D>>,
     input_state: InputState,
+    // Buffered input for movement commands with counts, e.g. "3j", or multi-character commands,
+    // e.g., "zz".
+    input_buffer: Vec<u8>,
     readline_editor: Editor<(), MemHistory>,
     dimensions: Dimensions,
     stdout: Box<dyn std::io::Write>,
@@ -40,6 +46,7 @@ impl<D: Document> App<D> {
             doc_while_waiting_for_input: Some(doc),
             viewer: None,
             input_state: InputState::Default,
+            input_buffer: vec![],
             dimensions,
             readline_editor,
             stdout,
@@ -47,34 +54,67 @@ impl<D: Document> App<D> {
     }
 
     pub fn handle_tty_event(&mut self, tty_event: TermionEvent) -> Option<Break> {
-        let action = match self.input_state {
-            InputState::PendingZCommand => {
-                self.input_state = InputState::Default;
-                match tty_event {
-                    TermionEvent::Key(Key::Char('t')) => Some(Action::MoveFocusedElemToTop),
-                    TermionEvent::Key(Key::Char('z')) => Some(Action::MoveFocusedElemToCenter),
-                    TermionEvent::Key(Key::Char('b')) => Some(Action::MoveFocusedElemToBottom),
-                    _ => None,
+        let action = match tty_event {
+            TermionEvent::Unsupported(_) => None,
+            TermionEvent::Mouse(_mouse_event) => None,
+            TermionEvent::Key(key_event) => match self.input_state {
+                InputState::PendingZCommand => {
+                    self.input_state = InputState::Default;
+                    self.input_buffer.clear();
+                    match key_event {
+                        Key::Char('t') => Some(Action::MoveFocusedElemToTop),
+                        Key::Char('z') => Some(Action::MoveFocusedElemToCenter),
+                        Key::Char('b') => Some(Action::MoveFocusedElemToBottom),
+                        _ => None,
+                    }
                 }
-            }
-            InputState::Default => match tty_event {
-                TermionEvent::Key(Key::Char('q') | Key::Ctrl('c')) => {
-                    // Immediately return; we are quitting the program.
-                    return Some(Break);
-                }
-                TermionEvent::Key(Key::Char('j')) => Some(Action::MoveCursorDown(1)),
-                TermionEvent::Key(Key::Char('k')) => Some(Action::MoveCursorUp(1)),
-                TermionEvent::Key(Key::Char('g')) => Some(Action::FocusTop),
-                TermionEvent::Key(Key::Char('G')) => Some(Action::FocusBottom),
-                TermionEvent::Key(Key::Ctrl('e')) => Some(Action::ScrollViewportDown(1)),
-                TermionEvent::Key(Key::Ctrl('y')) => Some(Action::ScrollViewportUp(1)),
-                TermionEvent::Key(Key::Ctrl('d')) => Some(Action::JumpDown(None)),
-                TermionEvent::Key(Key::Ctrl('u')) => Some(Action::JumpUp(None)),
-                TermionEvent::Key(Key::Char('z')) => {
-                    self.input_state = InputState::PendingZCommand;
-                    None
-                }
-                _ => None,
+                InputState::Default => match key_event {
+                    Key::Char('q') | Key::Ctrl('c') => {
+                        // Immediately return; we are quitting the program.
+                        return Some(Break);
+                    }
+                    Key::Char(ch @ '0'..='9') => {
+                        if ch == '0' && self.input_buffer.is_empty() {
+                            // Maybe a "focus first" action here someday
+                            None
+                        } else {
+                            self.buffer_input(ch as u8);
+                            None
+                        }
+                    }
+                    Key::Char('z') => {
+                        self.input_state = InputState::PendingZCommand;
+                        self.input_buffer.clear();
+                        self.buffer_input(b'z');
+                        None
+                    }
+                    // These inputs always clear [input_buffer]. (Some of them may use it.)
+                    _ => {
+                        let count = self.try_parse_input_buffer_as_number();
+                        let count_or_1 = count.unwrap_or(1);
+
+                        let action = match key_event {
+                            Key::Char('j') => Some(Action::MoveCursorDown(count_or_1)),
+                            Key::Char('k') => Some(Action::MoveCursorUp(count_or_1)),
+                            Key::Char('g') => Some(Action::FocusTop),
+                            Key::Char('G') => Some(Action::FocusBottom),
+                            Key::Ctrl('e') => Some(Action::ScrollViewportDown(count_or_1)),
+                            Key::Ctrl('y') => Some(Action::ScrollViewportUp(count_or_1)),
+                            Key::Ctrl('d') => {
+                                let count = count.map(NonZeroUsize::new).flatten();
+                                Some(Action::JumpDown(count))
+                            }
+                            Key::Ctrl('u') => {
+                                let count = count.map(NonZeroUsize::new).flatten();
+                                Some(Action::JumpUp(count))
+                            }
+                            Key::Esc => None,
+                            _ => None,
+                        };
+                        self.input_buffer.clear();
+                        action
+                    }
+                },
             },
         };
 
@@ -147,6 +187,26 @@ impl<D: Document> App<D> {
         }
 
         self.draw_screen();
+    }
+
+    fn buffer_input(&mut self, ch: u8) {
+        // Don't buffer leading 0s.
+        if self.input_buffer.is_empty() && ch == b'0' {
+            return;
+        }
+
+        if self.input_buffer.len() >= MAX_BUFFER_SIZE {
+            self.input_buffer.rotate_left(1);
+            self.input_buffer.pop();
+        }
+
+        self.input_buffer.push(ch);
+    }
+
+    fn try_parse_input_buffer_as_number(&mut self) -> Option<usize> {
+        let n = str::parse::<usize>(std::str::from_utf8(&self.input_buffer).unwrap());
+        self.input_buffer.clear();
+        n.ok()
     }
 
     fn draw_screen(&mut self) {
